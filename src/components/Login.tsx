@@ -3,6 +3,8 @@ import { Utensils, Lock, UserPlus, Clock, CheckCircle2, AlertCircle, Eye, EyeOff
 
 interface LoginProps {
   onLogin: (firstLogin?: boolean, userRole?: string, username?: string) => void;
+  initialMode?: 'login' | 'register';
+  onBackToLanding?: () => void;
 }
 
 interface PendingUserInfo {
@@ -11,8 +13,8 @@ interface PendingUserInfo {
   status?: string;
 }
 
-export const Login: React.FC<LoginProps> = ({ onLogin }) => {
-  const [mode, setMode] = useState<'login' | 'register' | 'pending_stub'>('login');
+export const Login: React.FC<LoginProps> = ({ onLogin, initialMode = 'login', onBackToLanding }) => {
+  const [mode, setMode] = useState<'login' | 'register' | 'pending_stub'>(initialMode);
   
   // Login form state
   const [username, setUsername] = useState('admin');
@@ -317,7 +319,17 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
   // 2. Main Auth Card (Login or Register)
   return (
     <div className="min-h-screen bg-[#F5F5F0] flex items-center justify-center p-4">
-      <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5 max-w-md w-full">
+      <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5 max-w-md w-full relative">
+        {onBackToLanding && (
+          <button
+            type="button"
+            onClick={onBackToLanding}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-emerald-700 transition-colors mb-4 group cursor-pointer"
+          >
+            <ArrowLeft size={14} className="group-hover:-translate-x-0.5 transition-transform" />
+            На главную страницу
+          </button>
+        )}
         <div className="flex flex-col items-center mb-6">
           <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mb-3">
             <Utensils size={32} />

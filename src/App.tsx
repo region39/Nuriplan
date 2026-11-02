@@ -14,18 +14,21 @@ import { Notification } from './components/Notification';
 import { PublicPlanView } from './components/PublicPlanView';
 import { Login } from './components/Login';
 import { UsersManagement } from './components/UsersManagement';
-import { LayoutDashboard, Calendar, Database as DbIcon, Settings as SettingsIcon, Utensils, RefreshCw, LogOut, Users as UsersIcon } from 'lucide-react';
+import { LandingPage } from './components/LandingPage';
+import { LayoutDashboard, Calendar, Database as DbIcon, Settings as SettingsIcon, Utensils, RefreshCw, LogOut, Users as UsersIcon, Globe } from 'lucide-react';
 import { APP_VERSION, BUILD_NUMBER } from './constants';
 
 type NavigationTab = 'dashboard' | 'planner' | 'database' | 'dishes' | 'settings' | 'users';
 
 function MainContent({ 
   onLogout, 
+  onShowLanding,
   initialTab = 'dashboard',
   userRole = 'user',
   currentUsername = 'admin'
 }: { 
   onLogout: () => void; 
+  onShowLanding?: () => void;
   initialTab?: NavigationTab;
   userRole?: string;
   currentUsername?: string;
@@ -151,7 +154,18 @@ function MainContent({
           </nav>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          {onShowLanding && (
+            <button
+              onClick={onShowLanding}
+              className="p-2 text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold cursor-pointer"
+              title="Посмотреть промо-лендинг сервиса"
+            >
+              <Globe size={17} />
+              <span className="hidden sm:inline">О сервисе</span>
+            </button>
+          )}
+
           <button 
             onClick={() => {
               loadPlans();
@@ -201,6 +215,8 @@ export default function App() {
   const [userRole, setUserRole] = useState<'admin' | 'user' | string>('admin');
   const [currentUsername, setCurrentUsername] = useState<string>('admin');
   const [initialTab, setInitialTab] = useState<NavigationTab>('dashboard');
+  const [guestView, setGuestView] = useState<'landing' | 'login' | 'register'>('landing');
+  const [showLandingForAuthUser, setShowLandingForAuthUser] = useState<boolean>(false);
 
   const checkAuth = async () => {
     // Safety timeout to prevent eternal loading
@@ -250,9 +266,33 @@ export default function App() {
     );
   }
 
+  // If user is authenticated but chose to preview the landing page
+  if (isAuthenticated && showLandingForAuthUser) {
+    return (
+      <LandingPage
+        isAuthenticated={true}
+        onOpenAuth={() => setShowLandingForAuthUser(false)}
+        onGoToApp={() => setShowLandingForAuthUser(false)}
+      />
+    );
+  }
+
+  // Guest view (landing or auth)
   if (!isAuthenticated) {
+    if (guestView === 'landing') {
+      return (
+        <LandingPage
+          isAuthenticated={false}
+          onOpenAuth={(mode) => setGuestView(mode || 'login')}
+          onGoToApp={() => setGuestView('login')}
+        />
+      );
+    }
+
     return (
       <Login 
+        initialMode={guestView}
+        onBackToLanding={() => setGuestView('landing')}
         onLogin={(isDefault, role, uname) => {
           if (isDefault) setInitialTab('settings');
           if (role) setUserRole(role);
@@ -266,7 +306,11 @@ export default function App() {
   return (
     <AppProvider>
       <MainContent 
-        onLogout={() => setIsAuthenticated(false)} 
+        onLogout={() => {
+          setIsAuthenticated(false);
+          setGuestView('landing');
+        }} 
+        onShowLanding={() => setShowLandingForAuthUser(true)}
         initialTab={initialTab} 
         userRole={userRole}
         currentUsername={currentUsername}
