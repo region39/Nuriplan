@@ -14,6 +14,7 @@ export const Dashboard: React.FC<{ onSelectPlan: () => void }> = ({ onSelectPlan
   const [sortBy, setSortBy] = useState<'date' | 'name'>('date');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [editingKcal, setEditingKcal] = useState<number>(2000);
 
   const filteredPlans = (Array.isArray(plans) ? plans : [])
     .filter(p => {
@@ -38,21 +39,36 @@ export const Dashboard: React.FC<{ onSelectPlan: () => void }> = ({ onSelectPlan
     onSelectPlan();
   };
 
-  const handleRename = async (plan: any) => {
+  const startEditing = (plan: any) => {
+    setEditingId(plan.id);
+    setEditingName(plan.clientName || plan.client_name || '');
+    setEditingKcal(Number(plan.targetKcal || plan.target_kcal || 2000));
+  };
+
+  const handleSavePlanDetails = async (plan: any) => {
     if (!editingName.trim()) return;
+    const kcal = Math.max(500, Math.min(10000, Number(editingKcal) || 2000));
+    const prevKcal = Number(plan.targetKcal || plan.target_kcal) || 2000;
+    const ratio = kcal / prevKcal;
+
+    const existingP = Number(plan.targetProteins || plan.target_proteins || 150);
+    const existingF = Number(plan.targetFats || plan.target_fats || 70);
+    const existingC = Number(plan.targetCarbs || plan.target_carbs || 250);
+
     const updatedPlan = {
       id: plan.id,
-      clientName: editingName,
-      targetKcal: plan.targetKcal || plan.target_kcal,
-      targetProteins: plan.targetProteins || plan.target_proteins,
-      targetFats: plan.targetFats || plan.target_fats,
-      targetCarbs: plan.targetCarbs || plan.target_carbs,
+      clientName: editingName.trim(),
+      targetKcal: kcal,
+      targetProteins: Math.round(existingP * ratio),
+      targetFats: Math.round(existingF * ratio),
+      targetCarbs: Math.round(existingC * ratio),
       startDate: plan.startDate || plan.start_date,
       endDate: plan.endDate || plan.end_date,
       mealTypes: plan.mealTypes || (plan.meal_types ? JSON.parse(plan.meal_types) : undefined),
       mealCategories: plan.mealCategories || (plan.meal_categories ? JSON.parse(plan.meal_categories) : undefined),
       data: typeof plan.data === 'string' ? JSON.parse(plan.data) : plan.data
     };
+
     await fetch('/api/plans', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -61,7 +77,7 @@ export const Dashboard: React.FC<{ onSelectPlan: () => void }> = ({ onSelectPlan
     });
     setEditingId(null);
     await loadPlans();
-    showNotification('Название обновлено', 'success');
+    showNotification('Параметры рациона (имя и целевой калораж) обновлены', 'success');
   };
 
   const getPlanStats = (plan: any) => {
@@ -208,53 +224,103 @@ export const Dashboard: React.FC<{ onSelectPlan: () => void }> = ({ onSelectPlan
                       {(plan.clientName || plan.client_name || 'U').charAt(0).toUpperCase()}
                     </div>
                     <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        {editingId === plan.id ? (
-                          <div className="flex items-center gap-2">
-                            <input 
-                              type="text"
-                              className="px-2 py-1 border border-emerald-500 rounded focus:outline-none text-lg font-semibold"
-                              value={editingName}
-                              onChange={(e) => setEditingName(e.target.value)}
-                              autoFocus
-                              onKeyDown={(e) => e.key === 'Enter' && handleRename(plan)}
-                            />
-                            <button onClick={() => handleRename(plan)} className="text-emerald-600 font-bold text-xs uppercase">Ок</button>
-                            <button onClick={() => setEditingId(null)} className="text-gray-400 font-bold text-xs uppercase">Отмена</button>
+                      {editingId === plan.id ? (
+                        <div className="bg-emerald-50/70 p-3 rounded-lg border border-emerald-200/80 my-1 w-full max-w-xl">
+                          <div className="text-[11px] font-bold text-emerald-800 uppercase tracking-wider mb-2 flex items-center justify-between">
+                            <span>Редактирование рациона</span>
+                            <span className="text-[10px] text-gray-500 font-normal">Нажмите Enter для сохранения</span>
                           </div>
-                        ) : (
-                          <>
-                            <h4 className="font-semibold text-lg">{plan.clientName || plan.client_name}</h4>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2.5">
+                            <div>
+                              <label className="block text-[11px] font-semibold text-gray-600 mb-1">Имя клиента</label>
+                              <input 
+                                type="text"
+                                className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-sm font-semibold text-gray-900"
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                placeholder="Имя клиента"
+                                autoFocus
+                                onKeyDown={(e) => e.key === 'Enter' && handleSavePlanDetails(plan)}
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-semibold text-gray-600 mb-1">Целевой калораж</label>
+                              <div className="relative">
+                                <input 
+                                  type="number"
+                                  min="500"
+                                  max="8000"
+                                  step="50"
+                                  className="w-full pl-2.5 pr-10 py-1.5 bg-white border border-emerald-300 rounded focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-sm font-bold text-emerald-700 font-mono"
+                                  value={editingKcal}
+                                  onChange={(e) => setEditingKcal(Number(e.target.value))}
+                                  placeholder="2000"
+                                  onKeyDown={(e) => e.key === 'Enter' && handleSavePlanDetails(plan)}
+                                />
+                                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-medium pointer-events-none">
+                                  ккал
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 justify-end">
                             <button 
-                              onClick={() => { setEditingId(plan.id); setEditingName(plan.clientName || plan.client_name); }}
+                              onClick={() => setEditingId(null)} 
+                              className="px-3 py-1 text-xs font-semibold text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded transition-colors"
+                            >
+                              Отмена
+                            </button>
+                            <button 
+                              onClick={() => handleSavePlanDetails(plan)} 
+                              className="px-4 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded transition-colors shadow-xs"
+                            >
+                              Сохранить
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <h4 className="font-semibold text-lg text-gray-900">{plan.clientName || plan.client_name}</h4>
+                            <button 
+                              onClick={() => startEditing(plan)}
                               className="p-1 text-gray-400 hover:text-emerald-600 transition-colors opacity-0 group-hover:opacity-100"
+                              title="Редактировать имя и целевой калораж"
                             >
                               <Edit2 size={14} />
                             </button>
-                          </>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-3 text-sm text-gray-500 flex-wrap">
-                        <span className="font-bold text-emerald-700">{plan.targetKcal || plan.target_kcal} ккал</span>
-                        <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                        <span className="text-[10px] uppercase">Б: {plan.targetProteins || plan.target_proteins || 150} Ж: {plan.targetFats || plan.target_fats || 70} У: {plan.targetCarbs || plan.target_carbs || 250}</span>
-                        <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                        <div className="flex items-center gap-1 text-[10px] uppercase text-blue-600 font-bold">
-                          <span>{stats.meals} приемов</span>
-                          <span>•</span>
-                          <span>{stats.dishes} блюд</span>
-                        </div>
-                        <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                        <div className="flex items-center gap-1 text-[10px] text-gray-400">
-                          <Calendar size={10} />
-                          <span>{new Date(plan.createdAt || plan.created_at).toLocaleDateString()}</span>
-                          {(plan.startDate || plan.start_date) && (
-                            <span className="ml-1 text-emerald-600 font-bold">
-                              ({new Date(plan.startDate || plan.start_date).toLocaleDateString()} - {new Date(plan.endDate || plan.end_date).toLocaleDateString()})
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                          </div>
+                          <div className="flex items-center gap-3 text-sm text-gray-500 flex-wrap mt-1">
+                            <button
+                              type="button"
+                              onClick={() => startEditing(plan)}
+                              className="inline-flex items-center gap-1 font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/80 px-2 py-0.5 rounded text-xs transition-colors cursor-pointer"
+                              title="Нажмите, чтобы изменить целевой калораж"
+                            >
+                              <span>{plan.targetKcal || plan.target_kcal} ккал</span>
+                              <Edit2 size={10} className="opacity-60" />
+                            </button>
+                            <span className="w-1 h-1 rounded-full bg-gray-300"></span>
+                            <span className="text-[10px] uppercase font-mono">Б: {plan.targetProteins || plan.target_proteins || 150} Ж: {plan.targetFats || plan.target_fats || 70} У: {plan.targetCarbs || plan.target_carbs || 250}</span>
+                            <span className="w-1 h-1 rounded-full bg-gray-300"></span>
+                            <div className="flex items-center gap-1 text-[10px] uppercase text-blue-600 font-bold">
+                              <span>{stats.meals} приемов</span>
+                              <span>•</span>
+                              <span>{stats.dishes} блюд</span>
+                            </div>
+                            <span className="w-1 h-1 rounded-full bg-gray-300"></span>
+                            <div className="flex items-center gap-1 text-[10px] text-gray-400">
+                              <Calendar size={10} />
+                              <span>{new Date(plan.createdAt || plan.created_at).toLocaleDateString()}</span>
+                              {(plan.startDate || plan.start_date) && (
+                                <span className="ml-1 text-emerald-600 font-bold">
+                                  ({new Date(plan.startDate || plan.start_date).toLocaleDateString()} - {new Date(plan.endDate || plan.end_date).toLocaleDateString()})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                   

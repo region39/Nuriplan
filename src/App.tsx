@@ -294,7 +294,7 @@ export default function App() {
         initialMode={guestView}
         onBackToLanding={() => setGuestView('landing')}
         onLogin={(isDefault, role, uname) => {
-          if (isDefault) setInitialTab('settings');
+          setInitialTab('dashboard');
           if (role) setUserRole(role);
           if (uname) setCurrentUsername(uname);
           setIsAuthenticated(true);
