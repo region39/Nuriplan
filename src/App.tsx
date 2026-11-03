@@ -18,6 +18,7 @@ import { UsersManagement } from './components/UsersManagement';
 import { LandingPage } from './components/LandingPage';
 import { LayoutDashboard, Calendar, Database as DbIcon, Settings as SettingsIcon, Utensils, RefreshCw, LogOut, Users as UsersIcon, Globe, MessageSquare } from 'lucide-react';
 import { APP_VERSION, BUILD_NUMBER } from './constants';
+import { apiFetch } from './utils/apiFetch';
 
 type NavigationTab = 'dashboard' | 'planner' | 'database' | 'dishes' | 'feedback' | 'settings' | 'users';
 
@@ -43,7 +44,7 @@ function MainContent({
     if (userRole === 'admin') {
       const fetchPending = async () => {
         try {
-          const res = await fetch('/api/admin/users', { credentials: 'include' });
+          const res = await apiFetch('/api/admin/users', { credentials: 'include' });
           if (res.ok) {
             const users = await res.json();
             if (Array.isArray(users)) {
@@ -72,7 +73,12 @@ function MainContent({
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+      localStorage.removeItem('nutriplan_auth_token');
+    } catch {
+      // ignore
+    }
+    try {
+      await apiFetch('/api/logout', { method: 'POST', credentials: 'include' });
       // Clear state and redirect to root
       onLogout();
       window.location.href = '/';
@@ -223,7 +229,7 @@ function MainContent({
 export default function App() {
   const [sharedPlanId, setSharedPlanId] = useState<string | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [userRole, setUserRole] = useState<'admin' | 'user' | string>('admin');
+  const [userRole, setUserRole] = useState<'admin' | 'user' | string>('user');
   const [currentUsername, setCurrentUsername] = useState<string>('admin');
   const [initialTab, setInitialTab] = useState<NavigationTab>('dashboard');
   const [guestView, setGuestView] = useState<'landing' | 'login' | 'register'>('landing');
@@ -236,7 +242,7 @@ export default function App() {
     }, 3000);
 
     try {
-      const response = await fetch(`/api/me?t=${Date.now()}`, { credentials: 'include' });
+      const response = await apiFetch(`/api/me?t=${Date.now()}`, { credentials: 'include' });
       if (!response.ok) {
         setIsAuthenticated(false);
         return;
@@ -244,8 +250,10 @@ export default function App() {
       const data = await response.json();
       setIsAuthenticated(!!data.authenticated);
       if (data.authenticated) {
-        if (data.role) setUserRole(data.role);
-        if (data.username) setCurrentUsername(data.username);
+        const resolvedUsername = data.username || 'admin';
+        const resolvedRole = data.role || (resolvedUsername.toLowerCase() === 'admin' ? 'admin' : 'user');
+        setUserRole(resolvedRole);
+        setCurrentUsername(resolvedUsername);
       }
     } catch (err) {
       console.error('Auth check failed:', err);
@@ -306,8 +314,10 @@ export default function App() {
         onBackToLanding={() => setGuestView('landing')}
         onLogin={(isDefault, role, uname) => {
           setInitialTab('dashboard');
-          if (role) setUserRole(role);
-          if (uname) setCurrentUsername(uname);
+          const resolvedName = uname || 'admin';
+          const resolvedRole = role || (resolvedName.toLowerCase() === 'admin' ? 'admin' : 'user');
+          setUserRole(resolvedRole);
+          setCurrentUsername(resolvedName);
           setIsAuthenticated(true);
         }} 
       />

@@ -54,8 +54,17 @@ export const Login: React.FC<LoginProps> = ({ onLogin, initialMode = 'login', on
       const data = await response.json();
 
       if (response.ok && data.success) {
+        if (data.token) {
+          try {
+            localStorage.setItem('nutriplan_auth_token', data.token);
+          } catch {
+            // ignore storage errors
+          }
+        }
         const isDefault = password === 'NutriPlan_2024_Secure!' && username === 'admin';
-        onLogin(isDefault, data.user?.role, data.user?.username);
+        const resolvedRole = data.role || data.user?.role || (username.trim().toLowerCase() === 'admin' ? 'admin' : 'user');
+        const resolvedUsername = data.username || data.user?.username || username.trim();
+        onLogin(isDefault, resolvedRole, resolvedUsername);
       } else if (response.status === 403 && data.status === 'pending') {
         // Account is waiting for admin approval -> show the stub page
         setPendingUser({

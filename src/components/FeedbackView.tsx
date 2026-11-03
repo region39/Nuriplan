@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, MessageSquare, CheckCircle2, Clock, Sparkles, Phone, User, ShieldCheck, Info } from 'lucide-react';
+import { apiFetch } from '../utils/apiFetch';
 
 interface FeedbackMessage {
   id: number;
@@ -42,7 +43,7 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
 
   const fetchFeedback = async () => {
     try {
-      const res = await fetch('/api/feedback', { credentials: 'include' });
+      const res = await apiFetch('/api/feedback', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
@@ -73,7 +74,7 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
     setSuccessBanner(null);
 
     try {
-      const res = await fetch('/api/feedback', {
+      const res = await apiFetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

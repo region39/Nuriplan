@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../store';
 import { Plus, Search, Trash2, Edit3, X, Save, Download, Upload } from 'lucide-react';
 import { Product } from '../types';
+import { apiFetch } from '../utils/apiFetch';
 
 export const Database: React.FC = () => {
   const { products, loadProducts, showNotification } = useApp();
@@ -71,7 +72,7 @@ export const Database: React.FC = () => {
 
     const payload = { ...formData, imageBase64 };
 
-    await fetch(url, {
+    await apiFetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -90,7 +91,7 @@ export const Database: React.FC = () => {
     }
     
     try {
-      const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' });
       if (res.ok) {
         await loadProducts();
         showNotification('Продукт удален', 'success');
@@ -133,7 +134,7 @@ export const Database: React.FC = () => {
           
           for (const product of productsToImport) {
             if (!product.name) continue;
-            await fetch('/api/products', {
+            await apiFetch('/api/products', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(product)

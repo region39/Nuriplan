@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../store';
 import { Plus, Trash2, Save, Utensils, Edit3, X, Download, Upload, Search, ChevronDown, Info, ArrowRight, RefreshCw } from 'lucide-react';
 import { SearchableItemSelect } from './SearchableItemSelect';
+import { apiFetch } from '../utils/apiFetch';
 
 export const DishConstructor: React.FC = () => {
   const { products, dishes, loadDishes, loadProducts, showNotification, settings, setIsDishConstructorDirty } = useApp();
@@ -81,7 +82,7 @@ export const DishConstructor: React.FC = () => {
   const submitQuickAddProduct = async () => {
     if (!quickAddProduct) return;
     try {
-      const res = await fetch('/api/products', {
+      const res = await apiFetch('/api/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -121,7 +122,7 @@ export const DishConstructor: React.FC = () => {
     if (editingId && originalType && originalType !== editingType) {
       try {
         const deleteUrl = originalType === 'ready_meal' ? `/api/products/${editingId}` : `/api/dishes/${editingId}`;
-        await fetch(deleteUrl, { method: 'DELETE' });
+        await apiFetch(deleteUrl, { method: 'DELETE' });
         currentId = null; // Reset ID so it's created in the new table
       } catch (err) {
         console.error('Error during conversion:', err);
@@ -144,7 +145,7 @@ export const DishConstructor: React.FC = () => {
       const url = currentId ? `/api/products/${currentId}` : '/api/products';
       const method = currentId ? 'PUT' : 'POST';
 
-      await fetch(url, {
+      await apiFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -166,7 +167,7 @@ export const DishConstructor: React.FC = () => {
       const url = currentId ? `/api/dishes/${currentId}` : '/api/dishes';
       const method = currentId ? 'PUT' : 'POST';
 
-      await fetch(url, {
+      await apiFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -187,7 +188,7 @@ export const DishConstructor: React.FC = () => {
 
     try {
       const url = type === 'ready_meal' ? `/api/products/${id}` : `/api/dishes/${id}`;
-      const res = await fetch(url, { method: 'DELETE' });
+      const res = await apiFetch(url, { method: 'DELETE' });
       if (res.ok) {
         if (type === 'ready_meal') await loadProducts();
         else await loadDishes();
@@ -200,7 +201,7 @@ export const DishConstructor: React.FC = () => {
   };
 
   const handleExportDishes = async () => {
-    const res = await fetch('/api/dishes?full=true');
+    const res = await apiFetch('/api/dishes?full=true');
     const fullDishes = await res.json();
     const blob = new Blob([JSON.stringify(fullDishes, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -213,7 +214,7 @@ export const DishConstructor: React.FC = () => {
 
   const handleExportSingleDish = async (dish: any) => {
     // Fetch full dish with ingredients
-    const res = await fetch(`/api/dishes/${dish.id}`);
+    const res = await apiFetch(`/api/dishes/${dish.id}`);
     const fullDish = await res.json();
     const blob = new Blob([JSON.stringify(fullDish, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -244,7 +245,7 @@ export const DishConstructor: React.FC = () => {
           
           for (const dish of dishesToImport) {
             if (!dish.name) continue;
-            await fetch('/api/dishes', {
+            await apiFetch('/api/dishes', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(dish)
@@ -308,7 +309,7 @@ export const DishConstructor: React.FC = () => {
       setIsManualPortion(true);
     } else {
       // Fetch ingredients for this dish
-      const res = await fetch(`/api/dishes/${dish.id}`);
+      const res = await apiFetch(`/api/dishes/${dish.id}`);
       const data = await res.json();
       const loadedIngredients = data.ingredients.map((i: any) => ({
         productId: i.productId,

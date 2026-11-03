@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { DietPlan, Product, Settings, Dish } from './types';
 import { DAYS, MEAL_TYPES, DEFAULT_SUB_ROWS } from './constants';
+import { apiFetch } from './utils/apiFetch';
 
 interface Notification {
   message: string;
@@ -54,7 +55,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadPlans = async () => {
     try {
-      const res = await fetch('/api/plans', { credentials: 'include' });
+      const res = await apiFetch('/api/plans', { credentials: 'include' });
       if (res.status === 401) {
         setPlans([]);
         return;
@@ -74,7 +75,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadPlan = async (id: string) => {
     try {
-      const res = await fetch(`/api/plans/${id}`, { credentials: 'include' });
+      const res = await apiFetch(`/api/plans/${id}`, { credentials: 'include' });
       if (res.status === 401) {
         return;
       }
@@ -99,7 +100,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const savePlan = async (plan: DietPlan) => {
     try {
-      const res = await fetch('/api/plans', {
+      const res = await apiFetch('/api/plans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(plan),
@@ -121,7 +122,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deletePlan = async (id: string) => {
     try {
-      const res = await fetch(`/api/plans/${id}`, { method: 'DELETE', credentials: 'include' });
+      const res = await apiFetch(`/api/plans/${id}`, { method: 'DELETE', credentials: 'include' });
       if (res.status === 401) {
         return;
       }
@@ -135,7 +136,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const duplicatePlan = async (id: string) => {
     try {
-      const res = await fetch(`/api/plans/${id}`, { credentials: 'include' });
+      const res = await apiFetch(`/api/plans/${id}`, { credentials: 'include' });
       if (res.status === 401) {
         return;
       }
@@ -221,7 +222,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadProducts = async () => {
     try {
-      const res = await fetch('/api/products', { credentials: 'include' });
+      const res = await apiFetch('/api/products', { credentials: 'include' });
       if (res.status === 401) {
         setProducts([]);
         return;
@@ -235,7 +236,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadDishes = async () => {
     try {
-      const res = await fetch(`/api/dishes?full=true&t=${Date.now()}`, { credentials: 'include' });
+      const res = await apiFetch(`/api/dishes?full=true&t=${Date.now()}`, { credentials: 'include' });
       if (res.status === 401) {
         setDishes([]);
         return;
@@ -250,7 +251,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadSettings = async () => {
     try {
-      const res = await fetch('/api/settings', { credentials: 'include' });
+      const res = await apiFetch('/api/settings', { credentials: 'include' });
       if (res.status === 401) {
         return;
       }
@@ -277,7 +278,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         mealTypes: JSON.stringify(newSettings.mealTypes),
         mealCategories: JSON.stringify(newSettings.mealCategories)
       };
-      const res = await fetch('/api/settings', {
+      const res = await apiFetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings: payload }),

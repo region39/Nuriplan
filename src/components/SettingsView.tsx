@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../store';
 import { Settings as SettingsIcon, Info, Plus, Trash2, Utensils, ChevronUp, ChevronDown, Lock, Eye, EyeOff, MessageSquare, Bell, Send, Save, Check, HelpCircle, CheckCircle2, XCircle } from 'lucide-react';
 import { APP_VERSION, BUILD_NUMBER } from '../constants';
+import { apiFetch } from '../utils/apiFetch';
 
 interface SettingsViewProps {
   userRole?: string;
@@ -38,7 +39,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ userRole = 'admin' }
 
   useEffect(() => {
     if (isAdmin) {
-      fetch('/api/admin/telegram', { credentials: 'include' })
+      apiFetch('/api/admin/telegram', { credentials: 'include' })
         .then(res => (res.ok ? res.json() : null))
         .then(data => {
           if (data) {
@@ -59,7 +60,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ userRole = 'admin' }
     setTgSaving(true);
     setTgStatusMsg(null);
     try {
-      const res = await fetch('/api/admin/telegram', {
+      const res = await apiFetch('/api/admin/telegram', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -93,7 +94,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ userRole = 'admin' }
     setTgTesting(true);
     setTgStatusMsg(null);
     try {
-      const res = await fetch('/api/admin/telegram/test', {
+      const res = await apiFetch('/api/admin/telegram/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -129,10 +130,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ userRole = 'admin' }
 
     setPasswordLoading(true);
     try {
-      const response = await fetch('/api/change-password', {
+      const response = await apiFetch('/api/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ currentPassword, newPassword }),
+        credentials: 'include',
       });
 
       const data = await response.json();

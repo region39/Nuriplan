@@ -966,6 +966,24 @@ async function startServer() {
   app.use(cookieParser());
   app.use("/uploads", express.static(UPLOADS_DIR));
 
+  const getTokenFromRequest = (req: express.Request): string | null => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const bearerToken = authHeader.slice(7).trim();
+      if (bearerToken && bearerToken !== 'null' && bearerToken !== 'undefined') {
+        return bearerToken;
+      }
+    }
+    const headerToken = req.headers['x-auth-token'];
+    if (typeof headerToken === 'string' && headerToken.trim()) {
+      return headerToken.trim();
+    }
+    if (req.cookies && req.cookies.auth_token) {
+      return req.cookies.auth_token;
+    }
+    return null;
+  };
+
   // Auth Middleware
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     // Skip auth for public routes
@@ -988,7 +1006,7 @@ async function startServer() {
       return next();
     }
 
-    const token = req.cookies.auth_token;
+    const token = getTokenFromRequest(req);
     if (!token) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -1011,21 +1029,25 @@ async function startServer() {
       return next();
     }
 
-    const token = req.cookies.auth_token;
+    const token = getTokenFromRequest(req);
     if (!token) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return res.status(401).json({ error: "Необходима авторизация" });
     }
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
-      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id) as any;
-      if (!user || user.role !== 'admin') {
+      const userId = decoded.id ?? decoded.userId;
+      let user = userId ? db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any : null;
+      if (!user && decoded.username) {
+        user = db.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?)").get(decoded.username) as any;
+      }
+      if (!user || (user.role !== 'admin' && user.username !== 'admin')) {
         return res.status(403).json({ error: "Доступ запрещен: требуются права администратора" });
       }
       (req as any).user = user;
       next();
     } catch (err) {
-      return res.status(401).json({ error: "Invalid token" });
+      return res.status(401).json({ error: "Сессия истекла, войдите снова" });
     }
   };
 
@@ -1197,40 +1219,49 @@ async function startServer() {
       });
     }
 
+    const effectiveRole = user.username === 'admin' ? 'admin' : (user.role || 'user');
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role || 'user' }, 
+      { id: user.id, username: user.username, role: effectiveRole }, 
       JWT_SECRET, 
-      { expiresIn: rememberMe ? '30d' : '1d' }
+      { expiresIn: rememberMe ? '30d' : '7d' }
     );
     
-    const isProduction = process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https';
+    const isSecure = process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https' || req.secure;
     
     const cookieOptions: express.CookieOptions = {
       httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax',
       path: '/'
     };
 
     if (rememberMe) {
       cookieOptions.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 days
+    } else {
+      cookieOptions.maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
     }
 
     res.cookie('auth_token', token, cookieOptions);
 
     res.json({ 
-      success: true, 
+      success: true,
+      token,
       username: user.username, 
-      role: user.role || 'user' 
+      role: effectiveRole,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: effectiveRole
+      }
     });
   });
 
   app.post("/api/logout", (req, res) => {
-    const isProduction = process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https';
+    const isSecure = process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https' || req.secure;
     res.clearCookie('auth_token', { 
       path: '/',
-      secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax'
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax'
     });
     res.json({ success: true });
   });
@@ -1242,21 +1273,26 @@ async function startServer() {
       return res.json({ authenticated: true, username: 'guest', role: 'admin', authMode: 'none' });
     }
 
-    const token = req.cookies.auth_token;
+    const token = getTokenFromRequest(req);
     if (!token) {
       return res.json({ authenticated: false, authMode: 'password' });
     }
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
-      const user = db.prepare("SELECT id, username, role, status FROM users WHERE id = ?").get(decoded.id) as any;
-      if (!user || user.status !== 'approved') {
+      const userId = decoded.id ?? decoded.userId;
+      let user = userId ? db.prepare("SELECT id, username, role, status FROM users WHERE id = ?").get(userId) as any : null;
+      if (!user && decoded.username) {
+        user = db.prepare("SELECT id, username, role, status FROM users WHERE LOWER(username) = LOWER(?)").get(decoded.username) as any;
+      }
+      if (!user || (user.status !== 'approved' && user.username !== 'admin')) {
         return res.json({ authenticated: false, authMode: 'password' });
       }
+      const effectiveRole = user.username === 'admin' ? 'admin' : (user.role || 'user');
       res.json({ 
         authenticated: true, 
         username: user.username, 
-        role: user.role || 'user', 
+        role: effectiveRole, 
         authMode: 'password' 
       });
     } catch (err) {
@@ -1273,13 +1309,14 @@ async function startServer() {
 
   app.post("/api/change-password", (req, res) => {
     const { currentPassword, newPassword } = req.body;
-    const token = req.cookies.auth_token;
+    const token = getTokenFromRequest(req);
     
     if (!token) return res.status(401).json({ error: "Unauthorized" });
     
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
-      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id) as any;
+      const userId = decoded.id ?? decoded.userId;
+      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
       
       if (!user || !bcrypt.compareSync(currentPassword, user.password_hash)) {
         return res.status(400).json({ error: "Неверный текущий пароль" });
@@ -1683,7 +1720,7 @@ async function startServer() {
       if (!existingPlan && isTelegramNotifyEnabled("telegram_notify_new_clients", true)) {
         let creatorName = "Пользователь";
         try {
-          const token = req.cookies?.auth_token;
+          const token = getTokenFromRequest(req);
           if (token) {
             const decoded = jwt.verify(token, JWT_SECRET) as any;
             if (decoded?.username) creatorName = decoded.username;
@@ -1804,14 +1841,15 @@ async function startServer() {
     const authModeRow = db.prepare("SELECT value FROM settings WHERE key = 'authMode'").get() as { value: string } | undefined;
     if (!authModeRow || authModeRow.value !== "none") {
       try {
-        const token = req.cookies?.auth_token;
+        const token = getTokenFromRequest(req);
         if (token) {
           const decoded = jwt.verify(token, JWT_SECRET) as any;
-          const user = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(decoded.userId) as any;
+          const userId = decoded.id ?? decoded.userId;
+          const user = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(userId) as any;
           if (user) {
             currentUserId = user.id;
             currentUsername = user.username;
-            currentRole = user.role || "user";
+            currentRole = user.username === "admin" ? "admin" : (user.role || "user");
           }
         }
       } catch {
@@ -1852,10 +1890,11 @@ async function startServer() {
     const authModeRow = db.prepare("SELECT value FROM settings WHERE key = 'authMode'").get() as { value: string } | undefined;
     if (!authModeRow || authModeRow.value !== "none") {
       try {
-        const token = req.cookies?.auth_token;
+        const token = getTokenFromRequest(req);
         if (token) {
           const decoded = jwt.verify(token, JWT_SECRET) as any;
-          const user = db.prepare("SELECT id, username FROM users WHERE id = ?").get(decoded.userId) as any;
+          const userId = decoded.id ?? decoded.userId;
+          const user = db.prepare("SELECT id, username FROM users WHERE id = ?").get(userId) as any;
           if (user) {
             currentUserId = user.id;
             currentUsername = user.username;

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { UserAccount } from '../types';
 import { useApp } from '../store';
+import { apiFetch } from '../utils/apiFetch';
 
 interface UsersManagementProps {
   currentUsername?: string;
@@ -31,15 +32,17 @@ export const UsersManagement: React.FC<UsersManagementProps> = ({ currentUsernam
   const fetchUsers = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/users', { credentials: 'include' });
+      const res = await apiFetch('/api/admin/users', { credentials: 'include' });
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error('Не удалось загрузить пользователей');
+        setUsers([]);
+        showNotification(data?.error || 'Не удалось загрузить пользователей', 'error');
+        return;
       }
-      const data = await res.json();
       setUsers(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error('Fetch users error:', err);
-      showNotification('Ошибка загрузки пользователей', 'error');
+      setUsers([]);
+      showNotification('Ошибка подключения при загрузке пользователей', 'error');
     } finally {
       setLoading(false);
     }
@@ -51,7 +54,7 @@ export const UsersManagement: React.FC<UsersManagementProps> = ({ currentUsernam
 
   const handleUpdateStatus = async (id: number, status: 'approved' | 'rejected' | 'pending') => {
     try {
-      const res = await fetch(`/api/admin/users/${id}/status`, {
+      const res = await apiFetch(`/api/admin/users/${id}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
@@ -94,7 +97,7 @@ export const UsersManagement: React.FC<UsersManagementProps> = ({ currentUsernam
 
     setModalLoading(true);
     try {
-      const res = await fetch(`/api/admin/users/${passwordModalUser.id}/password`, {
+      const res = await apiFetch(`/api/admin/users/${passwordModalUser.id}/password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ newPassword }),
@@ -125,7 +128,7 @@ export const UsersManagement: React.FC<UsersManagementProps> = ({ currentUsernam
     }
 
     try {
-      const res = await fetch(`/api/admin/users/${id}`, {
+      const res = await apiFetch(`/api/admin/users/${id}`, {
         method: 'DELETE',
         credentials: 'include'
       });
