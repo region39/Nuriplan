@@ -196,6 +196,17 @@ db.exec(`
     username TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS feedback_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT NOT NULL,
+    topic TEXT DEFAULT 'Общий вопрос',
+    contact_info TEXT DEFAULT '',
+    message TEXT NOT NULL,
+    telegram_sent INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
 `);
 
 // Migration for existing users table columns
@@ -240,6 +251,326 @@ try {
 
 // Ensure default settings exist
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('authMode', 'password')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_notify_new_clients', 'true')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_notify_new_users', 'true')").run();
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_notify_feedback', 'true')").run();
+
+function getSettingValue(key: string, defaultValue = ""): string {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row && row.value !== undefined && row.value !== null ? String(row.value) : defaultValue;
+}
+
+function isTelegramNotifyEnabled(key: string, defaultVal = true): boolean {
+  const val = getSettingValue(key, defaultVal ? "true" : "false");
+  return val === "true" || val === "1";
+}
+
+function escapeTelegramHtml(text: string): string {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+async function sendTelegramNotification(
+  htmlText: string,
+  overrideBotToken?: string,
+  overrideChatId?: string,
+  replyMarkup?: any
+): Promise<{ ok: boolean; error?: string }> {
+  const botToken = (overrideBotToken ?? getSettingValue("telegram_bot_token")).trim();
+  const chatId = (overrideChatId ?? getSettingValue("telegram_chat_id")).trim();
+
+  if (!botToken || !chatId) {
+    return { ok: false, error: "Telegram Bot Token или Chat ID не настроены" };
+  }
+
+  try {
+    const payload: Record<string, any> = {
+      chat_id: chatId,
+      text: htmlText,
+      parse_mode: "HTML",
+    };
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = (await response.json()) as any;
+    if (!response.ok || !data.ok) {
+      return { ok: false, error: data?.description || `Ошибка Telegram API (${response.status})` };
+    }
+    return { ok: true };
+  } catch (err: any) {
+    console.error("Telegram notification error:", err);
+    return { ok: false, error: err?.message || "Не удалось подключиться к Telegram API" };
+  }
+}
+
+let telegramUpdateOffset = 0;
+let isPollingTelegram = false;
+let lastPolledBotToken = "";
+
+async function handleTelegramBotCommandOrCallback(botToken: string, configuredChatId: string, update: any) {
+  // 1. Handle Inline Keyboard Button Clicks (callback_query)
+  if (update.callback_query) {
+    const cb = update.callback_query;
+    const cbId = cb.id;
+    const data = String(cb.data || "");
+    const message = cb.message;
+    const incomingChatId = message?.chat?.id ? String(message.chat.id) : "";
+
+    if (configuredChatId && incomingChatId !== configuredChatId) {
+      await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: cbId,
+          text: "⛔ Доступ разрешен только администратору",
+          show_alert: true,
+        }),
+      }).catch(() => {});
+      return;
+    }
+
+    if (data.startsWith("approve_user:") || data.startsWith("reject_user:")) {
+      const isApprove = data.startsWith("approve_user:");
+      const userIdStr = data.split(":")[1];
+      const userId = parseInt(userIdStr, 10);
+      const targetUser = db.prepare("SELECT id, username, status, role, ip_address FROM users WHERE id = ?").get(userId) as any;
+
+      if (!targetUser) {
+        await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            callback_query_id: cbId,
+            text: "⚠️ Пользователь не найден в базе данных",
+            show_alert: true,
+          }),
+        }).catch(() => {});
+        return;
+      }
+
+      if (targetUser.username === "admin") {
+        await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            callback_query_id: cbId,
+            text: "⚠️ Нельзя изменить статус главного администратора",
+            show_alert: true,
+          }),
+        }).catch(() => {});
+        return;
+      }
+
+      const newStatus = isApprove ? "approved" : "rejected";
+      db.prepare("UPDATE users SET status = ? WHERE id = ?").run(newStatus, targetUser.id);
+      console.log(`Telegram Bot Admin changed user #${targetUser.id} (${targetUser.username}) status to: ${newStatus}`);
+
+      const statusToast = isApprove
+        ? `✅ Пользователь ${targetUser.username} подтвержден!`
+        : `❌ Заявка ${targetUser.username} отклонена`;
+
+      await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: cbId,
+          text: statusToast,
+        }),
+      }).catch(() => {});
+
+      if (message && message.message_id) {
+        const updatedText = [
+          `🔔 <b>Заявка на регистрацию (NutriPlan+)</b>`,
+          `👤 Логин: <code>${escapeTelegramHtml(targetUser.username)}</code>`,
+          targetUser.ip_address ? `🌐 IP: <code>${escapeTelegramHtml(String(targetUser.ip_address))}</code>` : null,
+          ``,
+          isApprove
+            ? `✅ <b>Статус: Подтвержден администратором через Telegram</b>`
+            : `❌ <b>Статус: Отклонен администратором через Telegram</b>`,
+        ].filter(Boolean).join("\n");
+
+        await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: incomingChatId,
+            message_id: message.message_id,
+            text: updatedText,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [] },
+          }),
+        }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // 2. Handle Text Commands from Admin Chat
+  if (update.message && typeof update.message.text === "string") {
+    const incomingChatId = String(update.message.chat?.id || "");
+    if (!configuredChatId || incomingChatId !== configuredChatId) {
+      return;
+    }
+
+    const rawText = update.message.text.trim();
+    const lowerText = rawText.toLowerCase();
+
+    // Command: list pending users ("Заявки", "/pending", "/users")
+    if (lowerText === "заявки" || lowerText === "/pending" || lowerText === "/users") {
+      const pendingUsers = db.prepare(`
+        SELECT id, username, created_at, ip_address 
+        FROM users 
+        WHERE status = 'pending' 
+        ORDER BY id DESC
+      `).all() as any[];
+
+      if (pendingUsers.length === 0) {
+        await sendTelegramNotification(`✅ <b>Нет ожидающих заявок на регистрацию.</b>\nВсе пользователи обработаны.`);
+        return;
+      }
+
+      for (const u of pendingUsers) {
+        const text = [
+          `⏳ <b>Заявка ожидает подтверждения</b>`,
+          `👤 Логин: <code>${escapeTelegramHtml(u.username)}</code>`,
+          u.ip_address ? `🌐 IP: <code>${escapeTelegramHtml(String(u.ip_address))}</code>` : null,
+          `💡 Команды: <code>Подтвердить ${escapeTelegramHtml(u.username)}</code> или <code>Отклонить ${escapeTelegramHtml(u.username)}</code>`
+        ].filter(Boolean).join("\n");
+
+        await sendTelegramNotification(text, botToken, configuredChatId, {
+          inline_keyboard: [
+            [
+              { text: "✅ Подтвердить", callback_data: `approve_user:${u.id}` },
+              { text: "❌ Отклонить", callback_data: `reject_user:${u.id}` }
+            ]
+          ]
+        });
+      }
+      return;
+    }
+
+    // Command: Approve user ("Подтвердить", "Подтвердить <логин>", "/approve <логин>", "Одобрить <логин>")
+    const approveMatch = rawText.match(/^(?:подтвердить|одобрить|\/approve)(?:\s+(.+))?$/i);
+    if (approveMatch) {
+      const targetArg = approveMatch[1]?.trim();
+      let targetUser: any = null;
+
+      if (targetArg) {
+        targetUser = db.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR CAST(id AS TEXT) = ?").get(targetArg, targetArg);
+      } else {
+        targetUser = db.prepare("SELECT * FROM users WHERE status = 'pending' ORDER BY id DESC LIMIT 1").get();
+      }
+
+      if (!targetUser) {
+        const errMsg = targetArg
+          ? `⚠️ Пользователь <code>${escapeTelegramHtml(targetArg)}</code> не найден.`
+          : `ℹ️ Сейчас нет новых заявок в статусе ожидания. Вы также можете указать логин: <code>Подтвердить логин</code>`;
+        await sendTelegramNotification(errMsg, botToken, configuredChatId);
+        return;
+      }
+
+      db.prepare("UPDATE users SET status = 'approved' WHERE id = ?").run(targetUser.id);
+      await sendTelegramNotification(
+        `✅ Пользователь <b>${escapeTelegramHtml(targetUser.username)}</b> успешно <b>подтвержден</b>! Теперь он может войти в систему.`,
+        botToken,
+        configuredChatId
+      );
+      return;
+    }
+
+    // Command: Reject user ("Отклонить", "Отклонить <логин>", "/reject <логин>")
+    const rejectMatch = rawText.match(/^(?:отклонить|отказать|\/reject)(?:\s+(.+))?$/i);
+    if (rejectMatch) {
+      const targetArg = rejectMatch[1]?.trim();
+      let targetUser: any = null;
+
+      if (targetArg) {
+        targetUser = db.prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR CAST(id AS TEXT) = ?").get(targetArg, targetArg);
+      } else {
+        targetUser = db.prepare("SELECT * FROM users WHERE status = 'pending' ORDER BY id DESC LIMIT 1").get();
+      }
+
+      if (!targetUser) {
+        const errMsg = targetArg
+          ? `⚠️ Пользователь <code>${escapeTelegramHtml(targetArg)}</code> не найден.`
+          : `ℹ️ Сейчас нет новых заявок в статусе ожидания. Вы также можете указать логин: <code>Отклонить логин</code>`;
+        await sendTelegramNotification(errMsg, botToken, configuredChatId);
+        return;
+      }
+
+      if (targetUser.username === "admin") {
+        await sendTelegramNotification(`⚠️ Нельзя отклонить главного администратора.`, botToken, configuredChatId);
+        return;
+      }
+
+      db.prepare("UPDATE users SET status = 'rejected' WHERE id = ?").run(targetUser.id);
+      await sendTelegramNotification(
+        `❌ Заявка пользователя <b>${escapeTelegramHtml(targetUser.username)}</b> была <b>отклонена</b>.`,
+        botToken,
+        configuredChatId
+      );
+      return;
+    }
+
+    // Command: Help ("/help", "Помощь", "/start")
+    if (lowerText === "/help" || lowerText === "помощь" || lowerText === "/start") {
+      const helpMsg = [
+        `🤖 <b>Команды администратора NutriPlan+ в Telegram:</b>`,
+        ``,
+        `• Нажимайте кнопки <b>«✅ Подтвердить»</b> и <b>«❌ Отклонить»</b> прямо под уведомлением о новой регистрации.`,
+        `• <code>Подтвердить</code> — подтвердить последнюю ожидающую заявку`,
+        `• <code>Подтвердить логин</code> (или <code>/approve логин</code>) — подтвердить конкретного пользователя`,
+        `• <code>Отклонить</code> — отклонить последнюю ожидающую заявку`,
+        `• <code>Отклонить логин</code> (или <code>/reject логин</code>) — отклонить конкретного пользователя`,
+        `• <code>Заявки</code> (или <code>/pending</code>) — показать список всех заявок, ожидающих подтверждения`
+      ].join("\n");
+      await sendTelegramNotification(helpMsg, botToken, configuredChatId);
+    }
+  }
+}
+
+function startTelegramBotPoller() {
+  setInterval(async () => {
+    if (isPollingTelegram) return;
+    const botToken = getSettingValue("telegram_bot_token", "").trim();
+    const configuredChatId = getSettingValue("telegram_chat_id", "").trim();
+    if (!botToken || !configuredChatId) return;
+
+    isPollingTelegram = true;
+    try {
+      if (lastPolledBotToken !== botToken) {
+        lastPolledBotToken = botToken;
+        telegramUpdateOffset = 0;
+      }
+
+      const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query"]))}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+
+      const data = (await res.json()) as any;
+      if (data && data.ok && Array.isArray(data.result)) {
+        for (const update of data.result) {
+          if (typeof update.update_id === "number" && update.update_id >= telegramUpdateOffset) {
+            telegramUpdateOffset = update.update_id + 1;
+          }
+          await handleTelegramBotCommandOrCallback(botToken, configuredChatId, update);
+        }
+      }
+    } catch (err) {
+      // Silently ignore transient polling errors
+    } finally {
+      isPollingTelegram = false;
+    }
+  }, 3000);
+}
 
 // Password recovery mechanism: check for reset_password.txt in root directory
 const resetFile = path.join(process.cwd(), 'reset_password.txt');
@@ -764,10 +1095,33 @@ async function startServer() {
 
       console.log(`New user registered (pending approval): "${username}" from IP ${clientIp}`);
 
+      const newUserId = insertResult.lastInsertRowid;
+
+      if (isTelegramNotifyEnabled("telegram_notify_new_users", true) || isTelegramNotifyEnabled("telegram_notify_new_clients", true)) {
+        const msg = [
+          `🔔 <b>Новая регистрация пользователя (NutriPlan+)</b>`,
+          `👤 Логин: <code>${escapeTelegramHtml(username)}</code>`,
+          `🌐 IP: <code>${escapeTelegramHtml(String(clientIp))}</code>`,
+          `⏳ Статус: Ожидает подтверждения администратором`,
+          ``,
+          `💡 <i>Нажмите кнопку ниже или отправьте в чат команду:</i>`,
+          `<code>Подтвердить ${escapeTelegramHtml(username)}</code> или <code>Отклонить ${escapeTelegramHtml(username)}</code>`
+        ].join("\n");
+        const replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: "✅ Подтвердить", callback_data: `approve_user:${newUserId}` },
+              { text: "❌ Отклонить", callback_data: `reject_user:${newUserId}` }
+            ]
+          ]
+        };
+        sendTelegramNotification(msg, undefined, undefined, replyMarkup).catch(e => console.error("Failed to send registration telegram alert:", e));
+      }
+
       return res.json({
         success: true,
         user: {
-          id: insertResult.lastInsertRowid,
+          id: newUserId,
           username,
           status: 'pending',
           created_at: now
@@ -1309,6 +1663,8 @@ async function startServer() {
     try {
       const { id, clientName, targetKcal, targetProteins, targetFats, targetCarbs, startDate, endDate, mealTypes, mealCategories, data } = req.body;
       console.log('POST /api/plans', { id, clientName });
+      const existingPlan = id ? db.prepare("SELECT id FROM plans WHERE id = ?").get(id) : null;
+
       db.prepare("INSERT OR REPLACE INTO plans (id, client_name, target_kcal, target_proteins, target_fats, target_carbs, start_date, end_date, meal_types, meal_categories, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(
           id, 
@@ -1323,6 +1679,28 @@ async function startServer() {
           mealCategories ? JSON.stringify(mealCategories) : null,
           JSON.stringify(data)
         );
+
+      if (!existingPlan && isTelegramNotifyEnabled("telegram_notify_new_clients", true)) {
+        let creatorName = "Пользователь";
+        try {
+          const token = req.cookies?.auth_token;
+          if (token) {
+            const decoded = jwt.verify(token, JWT_SECRET) as any;
+            if (decoded?.username) creatorName = decoded.username;
+          }
+        } catch {
+          // ignore token decode error
+        }
+        const msg = [
+          `🆕 <b>Новый клиент в журнале рационов</b>`,
+          `👤 Клиент: <b>${escapeTelegramHtml(clientName || "Без имени")}</b>`,
+          `🔥 Целевой рацион: <b>${targetKcal || 2000} ккал</b> (Б: ${targetProteins || 150}г, Ж: ${targetFats || 70}г, У: ${targetCarbs || 250}г)`,
+          startDate && endDate ? `📅 Период: ${escapeTelegramHtml(startDate)} — ${escapeTelegramHtml(endDate)}` : null,
+          `👨‍🍳 Создал: <code>${escapeTelegramHtml(creatorName)}</code>`
+        ].filter(Boolean).join("\n");
+        sendTelegramNotification(msg).catch(e => console.error("Failed to send new client telegram alert:", e));
+      }
+
       res.json({ success: true });
     } catch (err) {
       console.error('Error in POST /api/plans:', err);
@@ -1348,10 +1726,190 @@ async function startServer() {
     }
   });
 
+  // Admin Telegram Integration Settings
+  app.get("/api/admin/telegram", requireAdmin, (req, res) => {
+    const botToken = getSettingValue("telegram_bot_token", "");
+    const chatId = getSettingValue("telegram_chat_id", "");
+    const contactNote = getSettingValue("telegram_contact_note", "");
+    const notifyNewClients = isTelegramNotifyEnabled("telegram_notify_new_clients", true);
+    const notifyNewUsers = isTelegramNotifyEnabled("telegram_notify_new_users", true);
+    const notifyFeedback = isTelegramNotifyEnabled("telegram_notify_feedback", true);
+
+    res.json({
+      botToken,
+      chatId,
+      contactNote,
+      notifyNewClients,
+      notifyNewUsers,
+      notifyFeedback,
+      isConfigured: Boolean(botToken.trim() && chatId.trim()),
+    });
+  });
+
+  app.post("/api/admin/telegram", requireAdmin, (req, res) => {
+    const {
+      botToken = "",
+      chatId = "",
+      contactNote = "",
+      notifyNewClients = true,
+      notifyNewUsers = true,
+      notifyFeedback = true,
+    } = req.body || {};
+
+    const upsert = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+    upsert.run("telegram_bot_token", String(botToken).trim());
+    upsert.run("telegram_chat_id", String(chatId).trim());
+    upsert.run("telegram_contact_note", String(contactNote).trim());
+    upsert.run("telegram_notify_new_clients", notifyNewClients ? "true" : "false");
+    upsert.run("telegram_notify_new_users", notifyNewUsers ? "true" : "false");
+    upsert.run("telegram_notify_feedback", notifyFeedback ? "true" : "false");
+
+    res.json({
+      success: true,
+      isConfigured: Boolean(String(botToken).trim() && String(chatId).trim()),
+    });
+  });
+
+  app.post("/api/admin/telegram/test", requireAdmin, async (req, res) => {
+    const botToken = (req.body?.botToken ?? getSettingValue("telegram_bot_token", "")).trim();
+    const chatId = (req.body?.chatId ?? getSettingValue("telegram_chat_id", "")).trim();
+
+    if (!botToken || !chatId) {
+      return res.status(400).json({ error: "Укажите Telegram Bot Token и Chat ID для проверки связи" });
+    }
+
+    const testHtml = [
+      `✅ <b>Тестовое соединение NutriPlan+</b>`,
+      `Модуль интеграции с Telegram успешно подключен!`,
+      `Здесь вы будете получать обращения пользователей из вкладки «Обратная связь» и выбранные уведомления.`,
+      ``,
+      `🤖 <b>Управление заявками прямо из бота:</b>`,
+      `• Под каждым уведомлением о регистрации доступны кнопки <b>«✅ Подтвердить»</b> и <b>«❌ Отклонить»</b>`,
+      `• Текстовые команды: <code>Подтвердить</code>, <code>Отклонить</code>, <code>Заявки</code> (или <code>/pending</code>)`
+    ].join("\n");
+
+    const result = await sendTelegramNotification(testHtml, botToken, chatId);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || "Ошибка отправки тестового сообщения" });
+    }
+    res.json({ success: true });
+  });
+
+  // User Feedback & Direct Admin Communication
+  app.get("/api/feedback", (req, res) => {
+    let currentUsername = "admin";
+    let currentRole = "admin";
+    let currentUserId: number | null = null;
+
+    const authModeRow = db.prepare("SELECT value FROM settings WHERE key = 'authMode'").get() as { value: string } | undefined;
+    if (!authModeRow || authModeRow.value !== "none") {
+      try {
+        const token = req.cookies?.auth_token;
+        if (token) {
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          const user = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(decoded.userId) as any;
+          if (user) {
+            currentUserId = user.id;
+            currentUsername = user.username;
+            currentRole = user.role || "user";
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+
+    let messages: any[] = [];
+    if (currentRole === "admin") {
+      messages = db.prepare("SELECT * FROM feedback_messages ORDER BY id ASC LIMIT 200").all();
+    } else {
+      messages = db.prepare("SELECT * FROM feedback_messages WHERE LOWER(username) = LOWER(?) ORDER BY id ASC LIMIT 100").all(currentUsername);
+    }
+
+    const botToken = getSettingValue("telegram_bot_token", "").trim();
+    const chatId = getSettingValue("telegram_chat_id", "").trim();
+    const contactNote = getSettingValue("telegram_contact_note", "").trim();
+
+    res.json({
+      messages,
+      telegramConfigured: Boolean(botToken && chatId),
+      contactNote,
+    });
+  });
+
+  app.post("/api/feedback", async (req, res) => {
+    const messageText = req.body?.message?.trim();
+    const topic = req.body?.topic?.trim() || "Общий вопрос";
+    const contactInfo = req.body?.contactInfo?.trim() || "";
+
+    if (!messageText) {
+      return res.status(400).json({ error: "Введите текст сообщения" });
+    }
+
+    let currentUsername = "admin";
+    let currentUserId: number | null = null;
+
+    const authModeRow = db.prepare("SELECT value FROM settings WHERE key = 'authMode'").get() as { value: string } | undefined;
+    if (!authModeRow || authModeRow.value !== "none") {
+      try {
+        const token = req.cookies?.auth_token;
+        if (token) {
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          const user = db.prepare("SELECT id, username FROM users WHERE id = ?").get(decoded.userId) as any;
+          if (user) {
+            currentUserId = user.id;
+            currentUsername = user.username;
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+
+    const now = new Date().toISOString();
+    let telegramSent = 0;
+    let telegramError: string | undefined;
+
+    if (isTelegramNotifyEnabled("telegram_notify_feedback", true)) {
+      const telegramText = [
+        `💬 <b>Новое сообщение обратной связи (NutriPlan+)</b>`,
+        `👤 Пользователь: <b>${escapeTelegramHtml(currentUsername)}</b>`,
+        `📌 Тема: ${escapeTelegramHtml(topic)}`,
+        contactInfo ? `📞 Контакт для ответа: <code>${escapeTelegramHtml(contactInfo)}</code>` : null,
+        ``,
+        `📝 <b>Сообщение:</b>`,
+        escapeTelegramHtml(messageText),
+      ].filter(v => v !== null).join("\n");
+
+      const tgResult = await sendTelegramNotification(telegramText);
+      if (tgResult.ok) {
+        telegramSent = 1;
+      } else {
+        telegramError = tgResult.error;
+      }
+    }
+
+    const insertResult = db.prepare(`
+      INSERT INTO feedback_messages (user_id, username, topic, contact_info, message, telegram_sent, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(currentUserId, currentUsername, topic, contactInfo, messageText, telegramSent, now);
+
+    const createdMessage = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(insertResult.lastInsertRowid);
+
+    res.json({
+      success: true,
+      message: createdMessage,
+      telegramSent: Boolean(telegramSent),
+      telegramError,
+    });
+  });
+
   app.get("/api/settings", (req, res) => {
     const settings = db.prepare("SELECT * FROM settings").all();
     const settingsMap = (settings as any[]).reduce((acc, curr) => {
-      acc[curr.key] = curr.value;
+      if (curr.key !== "telegram_bot_token") {
+        acc[curr.key] = curr.value;
+      }
       return acc;
     }, {});
     res.json(settingsMap);
@@ -1382,6 +1940,7 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    startTelegramBotPoller();
   });
 }
 

@@ -1,9 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../store';
-import { Settings as SettingsIcon, Info, Plus, Trash2, Utensils, ChevronUp, ChevronDown, Lock, Eye, EyeOff } from 'lucide-react';
+import { Settings as SettingsIcon, Info, Plus, Trash2, Utensils, ChevronUp, ChevronDown, Lock, Eye, EyeOff, MessageSquare, Bell, Send, Save, Check, HelpCircle, CheckCircle2, XCircle } from 'lucide-react';
 import { APP_VERSION, BUILD_NUMBER } from '../constants';
 
-export const SettingsView: React.FC = () => {
+interface SettingsViewProps {
+  userRole?: string;
+}
+
+export const SettingsView: React.FC<SettingsViewProps> = ({ userRole = 'admin' }) => {
+  const isAdmin = userRole === 'admin';
   const { settings, updateSettings, currentPlan, updatePlanSettings, dishes, showNotification } = useApp();
   const [activeTab, setActiveTab] = useState<'global' | 'project'>(currentPlan ? 'project' : 'global');
   const [newMealLabel, setNewMealLabel] = useState('');
@@ -15,6 +20,101 @@ export const SettingsView: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPasswords, setShowPasswords] = useState(false);
   const [passwordLoading, setPasswordLoading] = useState(false);
+
+  // Telegram integration state (Admin only)
+  const [tgBotToken, setTgBotToken] = useState('');
+  const [tgChatId, setTgChatId] = useState('');
+  const [tgContactNote, setTgContactNote] = useState('');
+  const [tgNotifyNewClients, setTgNotifyNewClients] = useState(true);
+  const [tgNotifyNewUsers, setTgNotifyNewUsers] = useState(true);
+  const [tgNotifyFeedback, setTgNotifyFeedback] = useState(true);
+  const [tgConfigured, setTgConfigured] = useState(false);
+  const [showBotToken, setShowBotToken] = useState(false);
+  const [showTgHelp, setShowTgHelp] = useState(false);
+  const [tgSaving, setTgSaving] = useState(false);
+  const [tgSaved, setTgSaved] = useState(false);
+  const [tgTesting, setTgTesting] = useState(false);
+  const [tgStatusMsg, setTgStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetch('/api/admin/telegram', { credentials: 'include' })
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          if (data) {
+            setTgBotToken(data.botToken || '');
+            setTgChatId(data.chatId || '');
+            setTgContactNote(data.contactNote || '');
+            setTgNotifyNewClients(data.notifyNewClients !== false);
+            setTgNotifyNewUsers(data.notifyNewUsers !== false);
+            setTgNotifyFeedback(data.notifyFeedback !== false);
+            setTgConfigured(Boolean(data.isConfigured));
+          }
+        })
+        .catch(err => console.error('Failed to load Telegram settings:', err));
+    }
+  }, [isAdmin]);
+
+  const handleSaveTelegram = async () => {
+    setTgSaving(true);
+    setTgStatusMsg(null);
+    try {
+      const res = await fetch('/api/admin/telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          botToken: tgBotToken.trim(),
+          chatId: tgChatId.trim(),
+          contactNote: tgContactNote.trim(),
+          notifyNewClients: tgNotifyNewClients,
+          notifyNewUsers: tgNotifyNewUsers,
+          notifyFeedback: tgNotifyFeedback,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTgConfigured(Boolean(data.isConfigured));
+        setTgSaved(true);
+        setTgStatusMsg({ type: 'success', text: 'Настройки Telegram и уведомлений сохранены' });
+        showNotification('Настройки Telegram сохранены', 'success');
+        setTimeout(() => setTgSaved(false), 2500);
+      } else {
+        setTgStatusMsg({ type: 'error', text: data.error || 'Ошибка сохранения настроек' });
+      }
+    } catch {
+      setTgStatusMsg({ type: 'error', text: 'Ошибка подключения к серверу' });
+    } finally {
+      setTgSaving(false);
+    }
+  };
+
+  const handleTestTelegram = async () => {
+    setTgTesting(true);
+    setTgStatusMsg(null);
+    try {
+      const res = await fetch('/api/admin/telegram/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          botToken: tgBotToken.trim(),
+          chatId: tgChatId.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTgStatusMsg({ type: 'success', text: 'Тестовое сообщение доставлено в ваш Telegram!' });
+        showNotification('Тестовое сообщение отправлено в Telegram', 'success');
+      } else {
+        setTgStatusMsg({ type: 'error', text: data.error || 'Не удалось отправить тестовое сообщение' });
+      }
+    } catch {
+      setTgStatusMsg({ type: 'error', text: 'Ошибка соединения при отправке теста' });
+    } finally {
+      setTgTesting(false);
+    }
+  };
 
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -215,6 +315,243 @@ export const SettingsView: React.FC = () => {
           <div>
             <p className="text-sm font-bold text-emerald-900">Настройки для рациона: {currentPlan.clientName}</p>
             <p className="text-xs text-emerald-700">Изменения здесь коснутся только этого конкретного проекта.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-only Telegram Bot & Notifications Integration Module */}
+      {isAdmin && (
+        <div className="mb-8 bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-black/5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-sky-100 text-sky-600 rounded-xl">
+                <MessageSquare size={22} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <h3 className="font-bold text-lg">Канал связи и интеграция с Telegram</h3>
+                  <span
+                    className={`text-xs px-2.5 py-0.5 rounded-full font-bold ${
+                      tgConfigured
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-amber-50 text-amber-700 border border-amber-200'
+                    }`}
+                  >
+                    {tgConfigured ? 'Подключено' : 'Не настроено'}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Привязка вашего Telegram-бота или чата для получения сообщений обратной связи от пользователей и уведомлений
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowTgHelp(prev => !prev)}
+              className="inline-flex items-center gap-1.5 text-xs font-bold text-sky-700 bg-sky-50 hover:bg-sky-100 px-3.5 py-2 rounded-xl transition-colors cursor-pointer self-start sm:self-auto"
+            >
+              <HelpCircle size={15} />
+              {showTgHelp ? 'Скрыть инструкцию' : 'Как подключить бота?'}
+            </button>
+          </div>
+
+          <div className="p-6 space-y-6">
+            {showTgHelp && (
+              <div className="bg-sky-50/70 border border-sky-200 rounded-xl p-4 text-xs text-sky-950 space-y-3">
+                <div>
+                  <p className="font-bold text-sm mb-1">Быстрая привязка Telegram-чата администратора:</p>
+                  <ol className="list-decimal list-inside space-y-1 text-sky-900/90">
+                    <li>
+                      В Telegram откройте <b>@BotFather</b>, отправьте команду <code>/newbot</code> и скопируйте полученный <b>Bot Token</b>.
+                    </li>
+                    <li>
+                      Напишите вашему новому боту сообщение <code>/start</code> (или добавьте бота в рабочую группу администраторов).
+                    </li>
+                    <li>
+                      Узнайте ваш <b>Chat ID</b> (например, через <b>@userinfobot</b> или <b>@getmyid_bot</b>) и укажите его ниже. Для группового чата ID начинается со знака минус (например, <code>-100123456789</code>).
+                    </li>
+                  </ol>
+                </div>
+                <div className="pt-2 border-t border-sky-200/80">
+                  <p className="font-bold text-sm mb-1">Подтверждение и отклонение новых пользователей прямо в боте:</p>
+                  <ul className="list-disc list-inside space-y-1 text-sky-900/90">
+                    <li>
+                      Под каждым уведомлением о новой регистрации приходят интерактивные кнопки <b>«✅ Подтвердить»</b> и <b>«❌ Отклонить»</b>.
+                    </li>
+                    <li>
+                      Также поддерживаются текстовые команды в чате с ботом: <code>Подтвердить</code> (или <code>Подтвердить логин</code>), <code>Отклонить</code> (или <code>Отклонить логин</code>), а также <code>Заявки</code> (или <code>/pending</code>) для вывода всех ожидающих пользователей.
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-1.5">
+                  Telegram Bot Token
+                </label>
+                <div className="relative">
+                  <input
+                    type={showBotToken ? 'text' : 'password'}
+                    value={tgBotToken}
+                    onChange={e => setTgBotToken(e.target.value)}
+                    placeholder="1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+                    className="w-full pl-3.5 pr-10 py-2.5 bg-gray-50 border border-black/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowBotToken(prev => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 p-1 cursor-pointer"
+                    title={showBotToken ? 'Скрыть токен' : 'Показать токен'}
+                  >
+                    {showBotToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-1.5">
+                  ID чата или канала администратора (Telegram Chat ID)
+                </label>
+                <input
+                  type="text"
+                  value={tgChatId}
+                  onChange={e => setTgChatId(e.target.value)}
+                  placeholder="Например: 482910492 или -100192837465"
+                  className="w-full px-3.5 py-2.5 bg-gray-50 border border-black/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1.5">
+                Информационная подпись для пользователей (отображается в окне «Обратная связь»)
+              </label>
+              <input
+                type="text"
+                value={tgContactNote}
+                onChange={e => setTgContactNote(e.target.value)}
+                placeholder="Например: Отвечаем ежедневно с 9:00 до 20:00. Для быстрого ответа укажите ваш @username или телефон."
+                className="w-full px-3.5 py-2.5 bg-gray-50 border border-black/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              />
+            </div>
+
+            {/* Уведомления (Notifications) */}
+            <div className="pt-4 border-t border-black/5">
+              <div className="flex items-center gap-2 mb-2">
+                <Bell size={18} className="text-emerald-600" />
+                <h4 className="font-bold text-sm text-gray-900">Уведомления</h4>
+              </div>
+              <p className="text-xs text-gray-500 mb-4">
+                Настройте, о каких событиях отправлять мгновенные оповещения в ваш Telegram-чат:
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <label
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border transition-colors cursor-pointer ${
+                    tgNotifyNewClients
+                      ? 'border-emerald-600/40 bg-emerald-50/40'
+                      : 'border-black/10 hover:border-black/20 bg-gray-50/60'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={tgNotifyNewClients}
+                    onChange={e => setTgNotifyNewClients(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-emerald-600 rounded cursor-pointer"
+                  />
+                  <div>
+                    <div className="font-bold text-sm text-gray-900">Уведомления о новых клиентах</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Оповещать при создании нового рациона клиента в журнале рационов
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border transition-colors cursor-pointer ${
+                    tgNotifyNewUsers
+                      ? 'border-emerald-600/40 bg-emerald-50/40'
+                      : 'border-black/10 hover:border-black/20 bg-gray-50/60'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={tgNotifyNewUsers}
+                    onChange={e => setTgNotifyNewUsers(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-emerald-600 rounded cursor-pointer"
+                  />
+                  <div>
+                    <div className="font-bold text-sm text-gray-900">Регистрация новых пользователей</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Оповещения о новых заявках с кнопками «✅ Подтвердить» / «❌ Отклонить» и поддержкой команд прямо в боте
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border transition-colors cursor-pointer ${
+                    tgNotifyFeedback
+                      ? 'border-emerald-600/40 bg-emerald-50/40'
+                      : 'border-black/10 hover:border-black/20 bg-gray-50/60'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={tgNotifyFeedback}
+                    onChange={e => setTgNotifyFeedback(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-emerald-600 rounded cursor-pointer"
+                  />
+                  <div>
+                    <div className="font-bold text-sm text-gray-900">Сообщения обратной связи</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Пересылать обращения авторизованных пользователей из окна чата в Telegram
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {tgStatusMsg && (
+              <div
+                className={`p-3.5 rounded-xl text-xs font-bold flex items-center gap-2 ${
+                  tgStatusMsg.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-red-50 text-red-700 border border-red-200'
+                }`}
+              >
+                {tgStatusMsg.type === 'success' ? (
+                  <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                ) : (
+                  <XCircle size={16} className="text-red-600 shrink-0" />
+                )}
+                <span>{tgStatusMsg.text}</span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleTestTelegram}
+                disabled={tgTesting || !tgBotToken.trim() || !tgChatId.trim()}
+                className="flex items-center gap-2 px-4 py-2.5 bg-sky-50 text-sky-700 border border-sky-200 rounded-xl text-sm font-bold hover:bg-sky-100 transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                <Send size={16} />
+                {tgTesting ? 'Отправка теста...' : 'Проверить связь (Тест)'}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveTelegram}
+                disabled={tgSaving}
+                className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                {tgSaved ? <Check size={16} /> : <Save size={16} />}
+                {tgSaved ? 'Сохранено' : 'Сохранить настройки Telegram'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -10,15 +10,16 @@ import { Planner } from './components/Planner';
 import { Database } from './components/Database';
 import { DishConstructor } from './components/DishConstructor';
 import { SettingsView } from './components/SettingsView';
+import FeedbackView from './components/FeedbackView';
 import { Notification } from './components/Notification';
 import { PublicPlanView } from './components/PublicPlanView';
 import { Login } from './components/Login';
 import { UsersManagement } from './components/UsersManagement';
 import { LandingPage } from './components/LandingPage';
-import { LayoutDashboard, Calendar, Database as DbIcon, Settings as SettingsIcon, Utensils, RefreshCw, LogOut, Users as UsersIcon, Globe } from 'lucide-react';
+import { LayoutDashboard, Calendar, Database as DbIcon, Settings as SettingsIcon, Utensils, RefreshCw, LogOut, Users as UsersIcon, Globe, MessageSquare } from 'lucide-react';
 import { APP_VERSION, BUILD_NUMBER } from './constants';
 
-type NavigationTab = 'dashboard' | 'planner' | 'database' | 'dishes' | 'settings' | 'users';
+type NavigationTab = 'dashboard' | 'planner' | 'database' | 'dishes' | 'feedback' | 'settings' | 'users';
 
 function MainContent({ 
   onLogout, 
@@ -127,6 +128,15 @@ function MainContent({
               <DbIcon size={18} />
               <span className="text-sm">База продуктов</span>
             </button>
+
+            <button 
+              onClick={() => handleTabChange('feedback')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-none transition-all ${activeTab === 'feedback' ? 'bg-emerald-50 text-emerald-700 font-medium' : 'hover:bg-gray-50 text-gray-500'}`}
+              title="Связаться с администратором"
+            >
+              <MessageSquare size={18} />
+              <span className="text-sm">Обратная связь</span>
+            </button>
             
             <button 
               onClick={() => handleTabChange('settings')}
@@ -201,7 +211,8 @@ function MainContent({
         {activeTab === 'planner' && <Planner />}
         {activeTab === 'database' && <Database />}
         {activeTab === 'dishes' && <DishConstructor />}
-        {activeTab === 'settings' && <SettingsView />}
+        {activeTab === 'feedback' && <FeedbackView userRole={userRole} currentUsername={currentUsername} />}
+        {activeTab === 'settings' && <SettingsView userRole={userRole} />}
         {activeTab === 'users' && <UsersManagement currentUsername={currentUsername} />}
       </main>
       <Notification />
