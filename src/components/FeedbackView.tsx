@@ -1,5 +1,17 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Send, MessageSquare, CheckCircle2, Clock, Sparkles, Phone, User, ShieldCheck, Info } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Send,
+  MessageSquare,
+  CheckCircle2,
+  Clock,
+  Sparkles,
+  Phone,
+  User,
+  ShieldCheck,
+  Info,
+  Reply,
+  RefreshCw,
+} from 'lucide-react';
 import { apiFetch } from '../utils/apiFetch';
 
 interface FeedbackMessage {
@@ -10,6 +22,9 @@ interface FeedbackMessage {
   contact_info: string;
   message: string;
   telegram_sent: number;
+  telegram_message_id?: number | null;
+  admin_reply?: string | null;
+  replied_at?: string | null;
   created_at: string;
 }
 
@@ -31,6 +46,8 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [contactNote, setContactNote] = useState('');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   const [topic, setTopic] = useState(TOPICS[0]);
   const [contactInfo, setContactInfo] = useState('');
@@ -39,27 +56,57 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
   const [error, setError] = useState<string | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  // Admin inline reply state
+  const [replyingToId, setReplyingToId] = useState<number | null>(null);
+  const [replyDraft, setReplyDraft] = useState('');
+  const [savingReply, setSavingReply] = useState(false);
 
-  const fetchFeedback = async () => {
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const prevFingerprintRef = useRef<string>('');
+
+  const fetchFeedback = useCallback(async (isManual = false) => {
+    if (isManual) {
+      setRefreshing(true);
+    }
     try {
       const res = await apiFetch('/api/feedback', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setMessages(data.messages || []);
+        const incomingMessages: FeedbackMessage[] = data.messages || [];
+        setMessages(incomingMessages);
         setTelegramConfigured(Boolean(data.telegramConfigured));
         setContactNote(data.contactNote || '');
+        setLastRefreshedAt(new Date());
+
+        // Compute fingerprint to detect new messages or new admin replies
+        const nextFingerprint = incomingMessages
+          .map(m => `${m.id}:${m.admin_reply || ''}:${m.replied_at || ''}`)
+          .join('|');
+        if (prevFingerprintRef.current && prevFingerprintRef.current !== nextFingerprint) {
+          setTimeout(() => {
+            chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+          }, 100);
+        }
+        prevFingerprintRef.current = nextFingerprint;
       }
     } catch (err) {
       console.error('Failed to fetch feedback messages:', err);
     } finally {
       setLoading(false);
+      if (isManual) {
+        setRefreshing(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchFeedback();
-  }, []);
+    fetchFeedback(false);
+    // Auto-poll every 5 seconds so new messages and Telegram replies appear automatically
+    const interval = setInterval(() => {
+      fetchFeedback(false);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [fetchFeedback]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -107,6 +154,31 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
     }
   };
 
+  const handleAdminReplySubmit = async (feedbackId: number) => {
+    if (!replyDraft.trim() || savingReply) return;
+    setSavingReply(true);
+    try {
+      const res = await apiFetch(`/api/feedback/${feedbackId}/reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ reply: replyDraft.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.message) {
+          setMessages(prev => prev.map(m => (m.id === feedbackId ? data.message : m)));
+        }
+        setReplyingToId(null);
+        setReplyDraft('');
+      }
+    } catch (err) {
+      console.error('Failed to save admin reply:', err);
+    } finally {
+      setSavingReply(false);
+    }
+  };
+
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -146,8 +218,8 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left column: History / Chat stream */}
-        <div className="lg:col-span-7 bg-white rounded-2xl border border-black/5 shadow-sm flex flex-col h-[540px]">
-          <div className="px-6 py-4 border-b border-black/5 flex items-center justify-between">
+        <div className="lg:col-span-7 bg-white rounded-2xl border border-black/5 shadow-sm flex flex-col h-[580px]">
+          <div className="px-6 py-4 border-b border-black/5 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
               <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
                 <ShieldCheck className="w-5 h-5" />
@@ -158,17 +230,35 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
                 </h3>
                 <p className="text-xs text-black/50">
                   {userRole === 'admin'
-                    ? 'Все сообщения, отправленные пользователями в ваш Telegram'
+                    ? 'Отвечайте через Reply в Telegram или прямо здесь на сайте'
                     : `Вы вошли как ${currentUsername || 'пользователь'}`}
                 </p>
               </div>
             </div>
-            <span className="text-xs font-medium text-black/40 bg-black/[0.03] px-2.5 py-1 rounded-lg">
-              Сообщений: {messages.length}
-            </span>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => fetchFeedback(true)}
+                disabled={refreshing}
+                title={
+                  lastRefreshedAt
+                    ? `Обновлено в ${lastRefreshedAt.toLocaleTimeString('ru-RU')} (автообновление каждые 5 сек)`
+                    : 'Обновить список сообщений'
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+                <span>{refreshing ? 'Обновление...' : 'Обновить'}</span>
+              </button>
+
+              <span className="text-xs font-medium text-black/40 bg-black/[0.03] px-2.5 py-1.5 rounded-xl">
+                Сообщений: {messages.length}
+              </span>
+            </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-[#F8F9FA]/60">
+          <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-[#F8F9FA]/60">
             {loading ? (
               <div className="h-full flex items-center justify-center text-sm text-black/40">
                 Загрузка истории сообщений...
@@ -201,15 +291,26 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                        <span
-                          className={`text-xs font-semibold px-2 py-0.5 rounded-md ${
-                            isOwn && userRole !== 'admin'
-                              ? 'bg-white/15 text-white'
-                              : 'bg-emerald-50 text-emerald-700'
-                          }`}
-                        >
-                          {msg.topic || 'Общий вопрос'}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`text-[11px] font-mono px-1.5 py-0.5 rounded ${
+                              isOwn && userRole !== 'admin'
+                                ? 'bg-black/15 text-emerald-100'
+                                : 'bg-black/5 text-black/50'
+                            }`}
+                          >
+                            #{msg.id}
+                          </span>
+                          <span
+                            className={`text-xs font-semibold px-2 py-0.5 rounded-md ${
+                              isOwn && userRole !== 'admin'
+                                ? 'bg-white/15 text-white'
+                                : 'bg-emerald-50 text-emerald-700'
+                            }`}
+                          >
+                            {msg.topic || 'Общий вопрос'}
+                          </span>
+                        </div>
 
                         {userRole === 'admin' && (
                           <span className="text-xs font-medium text-black/60 flex items-center gap-1">
@@ -235,7 +336,7 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 mt-1.5 px-1 text-[11px] text-black/45">
+                    <div className="flex flex-wrap items-center gap-2 mt-1.5 px-1 text-[11px] text-black/45">
                       <span>
                         {new Date(msg.created_at).toLocaleString('ru-RU', {
                           day: '2-digit',
@@ -257,7 +358,93 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
                           Сохранено в журнале
                         </span>
                       )}
+                      {msg.admin_reply && (
+                        <>
+                          <span>•</span>
+                          <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                            <Reply className="w-3 h-3" />
+                            Ответ получен
+                          </span>
+                        </>
+                      )}
+                      {userRole === 'admin' && (
+                        <>
+                          <span>•</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (replyingToId === msg.id) {
+                                setReplyingToId(null);
+                              } else {
+                                setReplyingToId(msg.id);
+                                setReplyDraft(msg.admin_reply || '');
+                              }
+                            }}
+                            className="text-emerald-700 hover:text-emerald-800 font-semibold underline cursor-pointer"
+                          >
+                            {msg.admin_reply ? 'Изменить ответ' : 'Ответить'}
+                          </button>
+                        </>
+                      )}
                     </div>
+
+                    {msg.admin_reply && (
+                      <div className="mt-2.5 w-full flex justify-start">
+                        <div className="max-w-[88%] rounded-2xl rounded-tl-none bg-emerald-50/90 border border-emerald-200 p-3.5 text-black shadow-2xs">
+                          <div className="flex items-center justify-between gap-3 mb-1">
+                            <span className="text-xs font-bold text-emerald-800 flex items-center gap-1.5">
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                              Ответ администратора
+                            </span>
+                            {msg.replied_at && (
+                              <span className="text-[10px] text-emerald-700/70">
+                                {new Date(msg.replied_at).toLocaleString('ru-RU', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-sm text-emerald-950 whitespace-pre-wrap leading-relaxed">
+                            {msg.admin_reply}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {userRole === 'admin' && replyingToId === msg.id && (
+                      <div className="mt-2.5 w-full max-w-[90%] bg-white border border-emerald-200 rounded-xl p-3 shadow-xs space-y-2">
+                        <label className="block text-xs font-semibold text-emerald-800">
+                          Ответ пользователю {msg.username} (обращение #{msg.id}):
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={replyDraft}
+                          onChange={e => setReplyDraft(e.target.value)}
+                          placeholder="Введите текст ответа..."
+                          className="w-full px-3 py-2 bg-[#F8F9FA] border border-black/10 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-none"
+                        />
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setReplyingToId(null)}
+                            className="px-3 py-1.5 rounded-lg text-xs text-black/60 hover:bg-black/5 cursor-pointer"
+                          >
+                            Отмена
+                          </button>
+                          <button
+                            type="button"
+                            disabled={savingReply || !replyDraft.trim()}
+                            onClick={() => handleAdminReplySubmit(msg.id)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer"
+                          >
+                            {savingReply ? 'Сохранение...' : 'Сохранить ответ'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })
@@ -270,7 +457,7 @@ export default function FeedbackView({ userRole = 'user', currentUsername = '' }
         <div className="lg:col-span-5 bg-white rounded-2xl border border-black/5 shadow-sm p-6">
           <h3 className="text-lg font-bold text-black mb-1">Написать администратору</h3>
           <p className="text-xs text-black/50 mb-5">
-            Ваше обращение сразу поступит в рабочий Telegram-чат администратора.
+            Ваше обращение сразу поступит в рабочий Telegram-чат администратора. Ответ администратора появится прямо в этом окне.
           </p>
 
           <form onSubmit={handleSend} className="space-y-4">

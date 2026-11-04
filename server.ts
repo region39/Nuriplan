@@ -205,6 +205,10 @@ db.exec(`
     contact_info TEXT DEFAULT '',
     message TEXT NOT NULL,
     telegram_sent INTEGER DEFAULT 0,
+    telegram_message_id INTEGER,
+    telegram_chat_id TEXT DEFAULT '',
+    admin_reply TEXT DEFAULT NULL,
+    replied_at TEXT DEFAULT NULL,
     created_at TEXT NOT NULL
   );
 `);
@@ -249,6 +253,45 @@ try {
   console.error("Users table migration error:", e);
 }
 
+// Migration for existing feedback_messages table columns
+try {
+  const fbTableInfo = db.prepare("PRAGMA table_info(feedback_messages)").all() as any[];
+
+  if (!fbTableInfo.some(c => c.name === 'telegram_message_id')) {
+    try {
+      db.exec("ALTER TABLE feedback_messages ADD COLUMN telegram_message_id INTEGER");
+    } catch (e) {
+      console.error("Failed to add telegram_message_id column:", e);
+    }
+  }
+
+  if (!fbTableInfo.some(c => c.name === 'telegram_chat_id')) {
+    try {
+      db.exec("ALTER TABLE feedback_messages ADD COLUMN telegram_chat_id TEXT DEFAULT ''");
+    } catch (e) {
+      console.error("Failed to add telegram_chat_id column:", e);
+    }
+  }
+
+  if (!fbTableInfo.some(c => c.name === 'admin_reply')) {
+    try {
+      db.exec("ALTER TABLE feedback_messages ADD COLUMN admin_reply TEXT DEFAULT NULL");
+    } catch (e) {
+      console.error("Failed to add admin_reply column:", e);
+    }
+  }
+
+  if (!fbTableInfo.some(c => c.name === 'replied_at')) {
+    try {
+      db.exec("ALTER TABLE feedback_messages ADD COLUMN replied_at TEXT DEFAULT NULL");
+    } catch (e) {
+      console.error("Failed to add replied_at column:", e);
+    }
+  }
+} catch (e) {
+  console.error("Feedback table migration error:", e);
+}
+
 // Ensure default settings exist
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('authMode', 'password')").run();
 db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_notify_new_clients', 'true')").run();
@@ -277,7 +320,7 @@ async function sendTelegramNotification(
   overrideBotToken?: string,
   overrideChatId?: string,
   replyMarkup?: any
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; messageId?: number; chatId?: string }> {
   const botToken = (overrideBotToken ?? getSettingValue("telegram_bot_token")).trim();
   const chatId = (overrideChatId ?? getSettingValue("telegram_chat_id")).trim();
 
@@ -304,7 +347,11 @@ async function sendTelegramNotification(
     if (!response.ok || !data.ok) {
       return { ok: false, error: data?.description || `Ошибка Telegram API (${response.status})` };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      messageId: data?.result?.message_id,
+      chatId: data?.result?.chat?.id ? String(data.result.chat.id) : chatId,
+    };
   } catch (err: any) {
     console.error("Telegram notification error:", err);
     return { ok: false, error: err?.message || "Не удалось подключиться к Telegram API" };
@@ -315,6 +362,54 @@ let telegramUpdateOffset = 0;
 let isPollingTelegram = false;
 let lastPolledBotToken = "";
 
+function isAuthorizedAdminChat(incomingChat: any, configuredChatId: string): boolean {
+  if (!configuredChatId) return false;
+  const incomingId = incomingChat?.id ? String(incomingChat.id).trim() : "";
+  const incomingUsername = incomingChat?.username ? `@${String(incomingChat.username).trim().toLowerCase()}` : "";
+  const target = configuredChatId.trim();
+  const targetLower = target.toLowerCase();
+
+  if (incomingId && incomingId === target) return true;
+  if (incomingUsername && (incomingUsername === targetLower || incomingUsername.slice(1) === targetLower)) return true;
+
+  // Also check if any feedback message was sent to this numeric chat ID
+  if (incomingId) {
+    const knownChat = db.prepare("SELECT 1 FROM feedback_messages WHERE telegram_chat_id = ? LIMIT 1").get(incomingId);
+    if (knownChat) return true;
+  }
+  return false;
+}
+
+function findFeedbackForTelegramReply(repliedTo: any): any {
+  if (!repliedTo) return null;
+
+  // 1. Collect candidate Telegram message IDs (direct reply, forwarded channel post in discussion group, or external_reply)
+  const candidateMsgIds = new Set<number>();
+  if (typeof repliedTo.message_id === "number") candidateMsgIds.add(repliedTo.message_id);
+  if (typeof repliedTo.forward_from_message_id === "number") candidateMsgIds.add(repliedTo.forward_from_message_id);
+  if (typeof repliedTo.external_reply?.message_id === "number") candidateMsgIds.add(repliedTo.external_reply.message_id);
+
+  for (const msgId of candidateMsgIds) {
+    const row = db
+      .prepare("SELECT * FROM feedback_messages WHERE telegram_message_id = ? ORDER BY id DESC LIMIT 1")
+      .get(msgId) as any;
+    if (row) return row;
+  }
+
+  // 2. Fallback: parse #fb_<id> or Обращение #<id> from the original message text
+  const origText = String(repliedTo.text || repliedTo.caption || "");
+  const idMatch = origText.match(/(?:#fb_|Обращение\s*#|ID:\s*#?)(\d+)/i);
+  if (idMatch) {
+    const fbId = parseInt(idMatch[1], 10);
+    if (!isNaN(fbId)) {
+      const row = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(fbId) as any;
+      if (row) return row;
+    }
+  }
+
+  return null;
+}
+
 async function handleTelegramBotCommandOrCallback(botToken: string, configuredChatId: string, update: any) {
   // 1. Handle Inline Keyboard Button Clicks (callback_query)
   if (update.callback_query) {
@@ -324,7 +419,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
     const message = cb.message;
     const incomingChatId = message?.chat?.id ? String(message.chat.id) : "";
 
-    if (configuredChatId && incomingChatId !== configuredChatId) {
+    if (configuredChatId && !isAuthorizedAdminChat(message?.chat, configuredChatId)) {
       await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -413,14 +508,70 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
     return;
   }
 
-  // 2. Handle Text Commands from Admin Chat
-  if (update.message && typeof update.message.text === "string") {
-    const incomingChatId = String(update.message.chat?.id || "");
-    if (!configuredChatId || incomingChatId !== configuredChatId) {
+  // 2. Handle Text / Caption Messages, Replies, and Commands from Admin Chat or Channel
+  const adminMsg = update.message || update.channel_post || update.edited_message || update.edited_channel_post;
+  const rawText = String(adminMsg?.text || adminMsg?.caption || "").trim();
+
+  if (adminMsg && rawText) {
+    const incomingChatId = String(adminMsg.chat?.id || "");
+    const replyTargetChatId = incomingChatId || configuredChatId;
+
+    // 2a. Check if this is a Reply to a feedback notification message
+    const repliedTo = adminMsg.reply_to_message || adminMsg.external_reply;
+    if (repliedTo) {
+      const targetFeedback = findFeedbackForTelegramReply(repliedTo);
+      if (targetFeedback) {
+        const now = new Date().toISOString();
+        db.prepare(`
+          UPDATE feedback_messages
+          SET admin_reply = ?, replied_at = ?
+          WHERE id = ?
+        `).run(rawText, now, targetFeedback.id);
+
+        await sendTelegramNotification(
+          `✅ Ответ для пользователя <b>${escapeTelegramHtml(targetFeedback.username)}</b> (обращение #${targetFeedback.id}) сохранен и отображается в его разделе «Обратная связь».`,
+          botToken,
+          replyTargetChatId
+        );
+        return;
+      }
+    }
+
+    if (!isAuthorizedAdminChat(adminMsg.chat, configuredChatId)) {
       return;
     }
 
-    const rawText = update.message.text.trim();
+    // 2b. Command: Reply to feedback by ID ("Ответ #5 текст", "Ответ 5 текст", "/reply 5 текст")
+    const replyCmdMatch = rawText.match(/^(?:ответ|\/reply)\s+#?(?:fb_)?(\d+)\s+([\s\S]+)$/i);
+    if (replyCmdMatch) {
+      const fbId = parseInt(replyCmdMatch[1], 10);
+      const replyContent = replyCmdMatch[2].trim();
+      const targetFeedback = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(fbId) as any;
+
+      if (!targetFeedback) {
+        await sendTelegramNotification(
+          `⚠️ Обращение <code>#${fbId}</code> не найдено в базе данных.`,
+          botToken,
+          replyTargetChatId
+        );
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.prepare(`
+        UPDATE feedback_messages
+        SET admin_reply = ?, replied_at = ?
+        WHERE id = ?
+      `).run(replyContent, now, targetFeedback.id);
+
+      await sendTelegramNotification(
+        `✅ Ответ на обращение <b>#${targetFeedback.id}</b> для пользователя <b>${escapeTelegramHtml(targetFeedback.username)}</b> сохранен!`,
+        botToken,
+        replyTargetChatId
+      );
+      return;
+    }
+
     const lowerText = rawText.toLowerCase();
 
     // Command: list pending users ("Заявки", "/pending", "/users")
@@ -433,7 +584,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
       `).all() as any[];
 
       if (pendingUsers.length === 0) {
-        await sendTelegramNotification(`✅ <b>Нет ожидающих заявок на регистрацию.</b>\nВсе пользователи обработаны.`);
+        await sendTelegramNotification(`✅ <b>Нет ожидающих заявок на регистрацию.</b>\nВсе пользователи обработаны.`, botToken, replyTargetChatId);
         return;
       }
 
@@ -445,7 +596,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
           `💡 Команды: <code>Подтвердить ${escapeTelegramHtml(u.username)}</code> или <code>Отклонить ${escapeTelegramHtml(u.username)}</code>`
         ].filter(Boolean).join("\n");
 
-        await sendTelegramNotification(text, botToken, configuredChatId, {
+        await sendTelegramNotification(text, botToken, replyTargetChatId, {
           inline_keyboard: [
             [
               { text: "✅ Подтвердить", callback_data: `approve_user:${u.id}` },
@@ -473,7 +624,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
         const errMsg = targetArg
           ? `⚠️ Пользователь <code>${escapeTelegramHtml(targetArg)}</code> не найден.`
           : `ℹ️ Сейчас нет новых заявок в статусе ожидания. Вы также можете указать логин: <code>Подтвердить логин</code>`;
-        await sendTelegramNotification(errMsg, botToken, configuredChatId);
+        await sendTelegramNotification(errMsg, botToken, replyTargetChatId);
         return;
       }
 
@@ -481,7 +632,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
       await sendTelegramNotification(
         `✅ Пользователь <b>${escapeTelegramHtml(targetUser.username)}</b> успешно <b>подтвержден</b>! Теперь он может войти в систему.`,
         botToken,
-        configuredChatId
+        replyTargetChatId
       );
       return;
     }
@@ -502,12 +653,12 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
         const errMsg = targetArg
           ? `⚠️ Пользователь <code>${escapeTelegramHtml(targetArg)}</code> не найден.`
           : `ℹ️ Сейчас нет новых заявок в статусе ожидания. Вы также можете указать логин: <code>Отклонить логин</code>`;
-        await sendTelegramNotification(errMsg, botToken, configuredChatId);
+        await sendTelegramNotification(errMsg, botToken, replyTargetChatId);
         return;
       }
 
       if (targetUser.username === "admin") {
-        await sendTelegramNotification(`⚠️ Нельзя отклонить главного администратора.`, botToken, configuredChatId);
+        await sendTelegramNotification(`⚠️ Нельзя отклонить главного администратора.`, botToken, replyTargetChatId);
         return;
       }
 
@@ -515,7 +666,7 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
       await sendTelegramNotification(
         `❌ Заявка пользователя <b>${escapeTelegramHtml(targetUser.username)}</b> была <b>отклонена</b>.`,
         botToken,
-        configuredChatId
+        replyTargetChatId
       );
       return;
     }
@@ -526,13 +677,14 @@ async function handleTelegramBotCommandOrCallback(botToken: string, configuredCh
         `🤖 <b>Команды администратора NutriPlan+ в Telegram:</b>`,
         ``,
         `• Нажимайте кнопки <b>«✅ Подтвердить»</b> и <b>«❌ Отклонить»</b> прямо под уведомлением о новой регистрации.`,
+        `• Чтобы ответить пользователю в раздел «Обратная связь», сделайте <b>Reply (Ответить)</b> на его сообщение в Telegram или напишите: <code>Ответ #ID текст ответа</code>.`,
         `• <code>Подтвердить</code> — подтвердить последнюю ожидающую заявку`,
         `• <code>Подтвердить логин</code> (или <code>/approve логин</code>) — подтвердить конкретного пользователя`,
         `• <code>Отклонить</code> — отклонить последнюю ожидающую заявку`,
         `• <code>Отклонить логин</code> (или <code>/reject логин</code>) — отклонить конкретного пользователя`,
         `• <code>Заявки</code> (или <code>/pending</code>) — показать список всех заявок, ожидающих подтверждения`
       ].join("\n");
-      await sendTelegramNotification(helpMsg, botToken, configuredChatId);
+      await sendTelegramNotification(helpMsg, botToken, replyTargetChatId);
     }
   }
 }
@@ -549,9 +701,12 @@ function startTelegramBotPoller() {
       if (lastPolledBotToken !== botToken) {
         lastPolledBotToken = botToken;
         telegramUpdateOffset = 0;
+        // Ensure no webhook blocks getUpdates
+        await fetch(`https://api.telegram.org/bot${botToken}/deleteWebhook?drop_pending_updates=false`).catch(() => {});
       }
 
-      const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query"]))}`;
+      const allowedUpdates = ["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"];
+      const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(allowedUpdates))}`;
       const res = await fetch(url);
       if (!res.ok) return;
 
@@ -960,7 +1115,7 @@ seedDatabase(db);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '10mb' }));
   app.use(cookieParser());
@@ -1906,34 +2061,49 @@ async function startServer() {
     }
 
     const now = new Date().toISOString();
+
+    // Insert first so we have the feedback #ID to include in the Telegram message
+    const insertResult = db.prepare(`
+      INSERT INTO feedback_messages (user_id, username, topic, contact_info, message, telegram_sent, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, ?)
+    `).run(currentUserId, currentUsername, topic, contactInfo, messageText, now);
+
+    const feedbackId = Number(insertResult.lastInsertRowid);
     let telegramSent = 0;
+    let telegramMessageId: number | null = null;
+    let telegramChatId = "";
     let telegramError: string | undefined;
 
     if (isTelegramNotifyEnabled("telegram_notify_feedback", true)) {
       const telegramText = [
         `💬 <b>Новое сообщение обратной связи (NutriPlan+)</b>`,
+        `🆔 Обращение: <code>#fb_${feedbackId}</code>`,
         `👤 Пользователь: <b>${escapeTelegramHtml(currentUsername)}</b>`,
         `📌 Тема: ${escapeTelegramHtml(topic)}`,
         contactInfo ? `📞 Контакт для ответа: <code>${escapeTelegramHtml(contactInfo)}</code>` : null,
         ``,
         `📝 <b>Сообщение:</b>`,
         escapeTelegramHtml(messageText),
+        ``,
+        `↩️ <i>Ответьте (Reply) на это сообщение в Telegram или напишите <code>Ответ #${feedbackId} текст</code>, чтобы ваш ответ появился у пользователя на сайте.</i>`,
       ].filter(v => v !== null).join("\n");
 
       const tgResult = await sendTelegramNotification(telegramText);
       if (tgResult.ok) {
         telegramSent = 1;
+        telegramMessageId = tgResult.messageId ?? null;
+        telegramChatId = tgResult.chatId || getSettingValue("telegram_chat_id", "").trim();
+        db.prepare(`
+          UPDATE feedback_messages
+          SET telegram_sent = 1, telegram_message_id = ?, telegram_chat_id = ?
+          WHERE id = ?
+        `).run(telegramMessageId, telegramChatId, feedbackId);
       } else {
         telegramError = tgResult.error;
       }
     }
 
-    const insertResult = db.prepare(`
-      INSERT INTO feedback_messages (user_id, username, topic, contact_info, message, telegram_sent, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(currentUserId, currentUsername, topic, contactInfo, messageText, telegramSent, now);
-
-    const createdMessage = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(insertResult.lastInsertRowid);
+    const createdMessage = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(feedbackId);
 
     res.json({
       success: true,
@@ -1941,6 +2111,52 @@ async function startServer() {
       telegramSent: Boolean(telegramSent),
       telegramError,
     });
+  });
+
+  app.post("/api/feedback/:id/reply", async (req, res) => {
+    const feedbackId = parseInt(req.params.id, 10);
+    const replyText = req.body?.reply?.trim();
+
+    if (isNaN(feedbackId) || !replyText) {
+      return res.status(400).json({ error: "Укажите корректный текст ответа" });
+    }
+
+    // Verify admin role
+    let currentRole = "admin";
+    const authModeRow = db.prepare("SELECT value FROM settings WHERE key = 'authMode'").get() as { value: string } | undefined;
+    if (!authModeRow || authModeRow.value !== "none") {
+      try {
+        const token = getTokenFromRequest(req);
+        if (!token) {
+          return res.status(401).json({ error: "Требуется авторизация" });
+        }
+        const decoded = jwt.verify(token, JWT_SECRET) as any;
+        const userId = decoded.id ?? decoded.userId;
+        const user = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(userId) as any;
+        currentRole = user?.username === "admin" ? "admin" : (user?.role || "user");
+      } catch {
+        return res.status(401).json({ error: "Недействительный токен" });
+      }
+    }
+
+    if (currentRole !== "admin") {
+      return res.status(403).json({ error: "Только администратор может отвечать на обращения" });
+    }
+
+    const existing = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(feedbackId) as any;
+    if (!existing) {
+      return res.status(404).json({ error: "Обращение не найдено" });
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE feedback_messages
+      SET admin_reply = ?, replied_at = ?
+      WHERE id = ?
+    `).run(replyText, now, feedbackId);
+
+    const updatedMessage = db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(feedbackId);
+    res.json({ success: true, message: updatedMessage });
   });
 
   app.get("/api/settings", (req, res) => {
